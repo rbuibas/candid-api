@@ -1,0 +1,76 @@
+# Render Blueprint for candid-api.
+# EU region (Frankfurt) is required per CLAUDE.md — do not change.
+
+envVarGroups:
+  - name: candid-api-env
+    envVars:
+      - key: ENV
+        value: prod
+      - key: LOG_LEVEL
+        value: INFO
+      - key: CORS_ALLOW_ORIGINS
+        value: "*"
+      - key: SUPABASE_REGION
+        value: eu-central-1
+      - key: R2_REGION
+        value: auto
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+
+services:
+  - type: web
+    name: candid-api
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - fromGroup: candid-api-env
+
+  - type: cron
+    name: candid-generator
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    schedule: "0 * * * *"
+    dockerCommand: uv run python -m app.workers.generator
+    envVars:
+      - fromGroup: candid-api-env
+
+  - type: cron
+    name: candid-dispatcher
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    schedule: "* * * * *"
+    dockerCommand: uv run python -m app.workers.dispatcher
+    envVars:
+      - fromGroup: candid-api-env
+
+  - type: cron
+    name: candid-expirer
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    schedule: "* * * * *"
+    dockerCommand: uv run python -m app.workers.expirer
+    envVars:
+      - fromGroup: candid-api-env
