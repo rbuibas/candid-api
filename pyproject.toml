@@ -13,6 +13,7 @@ dependencies = [
     "firebase-admin>=6.5",
     "resend>=2.4",
     "python-multipart>=0.0.12",
+    "pyjwt[crypto]>=2.9",
 ]
 
 [dependency-groups]
@@ -33,9 +34,23 @@ packages = ["src/app"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = [".claude", ".venv"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI injects via call-in-default; these are safe to use as argument defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.File",
+    "fastapi.Form",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
