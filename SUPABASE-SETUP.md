@@ -88,30 +88,77 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=<from A.4>
 
 The anon key in the bundle is fine — that's its whole purpose, and it's RLS-protected. The service-role key and JWT secret stay server-side only. Ever.
 
-## F. Apply the Phase 1 migration
+## F. Apply migrations with the Supabase CLI
 
-The migration file lives at `supabase/migrations/<timestamp>_create_profiles.sql`. To apply it for the first time, the easiest path (no Supabase CLI install needed yet):
+There are now two migration files in `supabase/migrations/`:
 
-1. Open the file in your editor, copy its contents.
-2. In Supabase dashboard → **SQL Editor → New query** → paste → **Run**.
-3. **Table Editor**: confirm `public.profiles` now exists with the expected columns.
-4. **Database → Triggers** (or run `SELECT tgname FROM pg_trigger WHERE tgname LIKE '%user%';` in SQL editor): confirm `on_auth_user_created` is present.
+- `20260526195531_create_profiles.sql` — profiles + handle_new_user trigger + RLS
+- `20260529212325_create_mvp_tables.sql` — groups, group_members, invite_codes, prompts, posts, devices + enums + is_group_member helper + RLS on all
 
-Once we have ≥2 migrations and a more frequent cadence, install the Supabase CLI and use `supabase db push`. For the first one, dashboard SQL editor is fine.
+Recommended path — Supabase CLI:
 
-## End-to-end smoke test (after the code lands and is deployed)
+```bash
+# One-time install (pick the one for your OS):
+npm i -g supabase                           # any platform with Node
+scoop install supabase                      # Windows (scoop)
+brew install supabase/tap/supabase          # macOS
+
+# Authenticate + link to your project (one-time per machine):
+supabase login                              # opens a browser
+supabase link --project-ref <your-project-ref>
+# Your project-ref is the part of the dashboard URL after /project/.
+
+# Apply all pending migrations (idempotent — Supabase tracks applied ones):
+supabase db push
+```
+
+Fallback (no CLI installed yet) — paste each file into the dashboard SQL editor in
+timestamp order: open the file, copy contents, **SQL Editor → New query → Run**, then
+do the same for the next file. Both files are independent transactions so an error
+in one won't half-apply the other.
+
+After applying, verify:
+
+1. **Table Editor**: all seven tables exist (`profiles`, `groups`, `group_members`, `invite_codes`, `prompts`, `posts`, `devices`).
+2. **Database → Types**: the five enums are present (`prompt_status`, `media_type`, `post_kind`, `post_media_type`, `device_platform`).
+3. **Database → Triggers**: `on_auth_user_created`, `profiles_set_updated_at`, `groups_set_updated_at` are listed.
+4. **Database → Functions**: `handle_new_user`, `is_group_member`, `set_updated_at` are listed.
+5. **Authentication → Policies**: RLS is `enabled` on every Phase 1 table.
+
+## G. Run integration tests against the live project
+
+After migrations apply, run the integration suite to validate the trigger and RLS:
+
+```bash
+# From the candid-api repo root, with all four vars populated:
+SUPABASE_URL=https://<proj>.supabase.co \
+SUPABASE_ANON_KEY=eyJ...                     \
+SUPABASE_SERVICE_ROLE_KEY=eyJ...             \
+SUPABASE_JWT_SECRET=<32+ chars>              \
+    uv run pytest tests/integration -v
+```
+
+Expected: all four integration tests pass —
+- `test_handle_new_user_creates_profile` proves the trigger fires.
+- `test_user_can_read_their_own_profile` proves RLS allows self-reads.
+- `test_user_cannot_read_another_users_profile` proves RLS blocks cross-user reads.
+- `test_non_member_cannot_read_group` proves group-scoped RLS blocks outsiders.
+
+If any fail, the migration didn't fully apply — check the dashboard verification list above.
+
+## H. End-to-end smoke test (post-deploy)
 
 1. **Supabase → Authentication → Users → Add user → "Send magic link"** → enter your email.
 2. Open the email in your inbox; the link should look like `candid://...#access_token=...&refresh_token=...&...`.
 3. **Don't click the link** (it won't resolve without the mobile app). Instead, in the Supabase dashboard, go to **Authentication → Users → click your user row → copy the `access_token`** (or use the SQL editor to query `auth.sessions`).
 4. Test the protected endpoint:
    ```bash
-   curl -H "Authorization: Bearer <jwt>" https://candid-api-7o72.onrender.com/profile
+   curl -H "Authorization: Bearer <jwt>" https://candid-api-7o72.onrender.com/profile/me
    # Expected: {"id":"...","display_name":null,"avatar_url":null,"timezone":"UTC", ...}
    ```
 5. Test that auth is required:
    ```bash
-   curl https://candid-api-7o72.onrender.com/profile
+   curl https://candid-api-7o72.onrender.com/profile/me
    # Expected: {"detail":"Missing Authorization header"} with HTTP 401
    ```
 6. **Table Editor → profiles**: confirm a row exists for your user with `timezone='UTC'`.

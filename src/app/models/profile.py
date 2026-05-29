@@ -4,7 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class ProfileRead(BaseModel):
+class Profile(BaseModel):
     id: UUID
     display_name: str | None
     avatar_url: str | None

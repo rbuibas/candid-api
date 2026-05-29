@@ -55,3 +55,6 @@ extend-immutable-calls = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: requires live Supabase env vars (skipped when missing)",
+]

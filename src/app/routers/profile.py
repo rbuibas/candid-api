@@ -3,46 +3,35 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import Client
 
-from app.auth.jwt import get_current_user_id
+from app.auth.jwt import get_current_user, get_current_user_id
 from app.clients.supabase import get_supabase
-from app.models.profile import ProfileRead, ProfileUpdate
+from app.models.profile import Profile, ProfileUpdate
+from app.services import profile as profile_service
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
 
-@router.get("", response_model=ProfileRead)
-def get_profile(
-    user_id: UUID = Depends(get_current_user_id),
-    sb: Client = Depends(get_supabase),
-) -> ProfileRead:
-    result = sb.table("profiles").select("*").eq("id", str(user_id)).single().execute()
-    if not result.data:
-        # handle_new_user trigger creates the row at signup; this is unreachable
-        # in normal flow but guards against a manual auth.users insert that skipped it.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Profile not found",
-        )
-    return ProfileRead.model_validate(result.data)
+@router.get("/me", response_model=Profile)
+def get_me(profile: Profile = Depends(get_current_user)) -> Profile:
+    # get_current_user already fetched the profile — just return it.
+    return profile
 
 
-@router.patch("", response_model=ProfileRead)
-def update_profile(
+@router.patch("/me", response_model=Profile)
+def patch_me(
     payload: ProfileUpdate,
     user_id: UUID = Depends(get_current_user_id),
     sb: Client = Depends(get_supabase),
-) -> ProfileRead:
-    update_dict = payload.model_dump(exclude_unset=True)
-    if not update_dict:
+) -> Profile:
+    try:
+        return profile_service.update_for_user(sb, user_id, payload)
+    except profile_service.EmptyPatchError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one field must be provided",
-        )
-
-    result = sb.table("profiles").update(update_dict).eq("id", str(user_id)).execute()
-    if not result.data:
+        ) from e
+    except profile_service.ProfileNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Profile not found",
-        )
-    return ProfileRead.model_validate(result.data[0])
+        ) from e
