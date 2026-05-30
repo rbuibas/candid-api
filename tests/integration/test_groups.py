@@ -7,6 +7,7 @@ group_members / invite_codes, so test data evaporates after each run.
 
 from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 from uuid import UUID
 
 import jwt
@@ -227,6 +228,7 @@ def test_delete_by_creator_cascades(
     make_user: Callable[..., UUID],
     integration_env: dict[str, str],
     service_sb: Client,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     creator = make_user()
     joiner = make_user()
@@ -240,8 +242,15 @@ def test_delete_by_creator_cascades(
     group_id = create_resp.json()["group"]["id"]
     app_client.post("/groups/join", headers=_auth(joiner, integration_env), json={"code": code})
 
+    # DB cascade is the focus of this test; the R2 round-trip is covered by
+    # tests/integration/test_posts.py (gated separately on R2 envs). Stub the
+    # purge so this test still works against a Supabase-only environment.
+    delete_prefix = MagicMock()
+    monkeypatch.setattr("app.services.groups.r2.delete_prefix", delete_prefix)
+
     resp = app_client.delete(f"/groups/{group_id}", headers=_auth(creator, integration_env))
     assert resp.status_code == 204, resp.text
+    delete_prefix.assert_called_once_with(f"groups/{group_id}/")
 
     # Group is gone; cascade removed members and invite codes.
     assert service_sb.table("groups").select("id").eq("id", group_id).execute().data == []

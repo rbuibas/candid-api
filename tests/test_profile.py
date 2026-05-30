@@ -182,3 +182,145 @@ def test_patch_me_missing_profile_returns_404(auth_client: TestClient, fake_sb: 
         json={"timezone": "UTC"},
     )
     assert response.status_code == 404
+
+
+# --- Avatar URL resolution -------------------------------------------
+
+
+def test_get_me_resolves_stored_avatar_to_signed_url(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored value is an R2 storage_path; the response must surface a
+    fresh signed GET URL — clients never see the raw key."""
+    user_id = uuid4()
+    storage_path = f"users/{user_id}/avatars/abc.jpg"
+    _stub_select(fake_sb, _profile_row(user_id, avatar_url=storage_path))
+
+    monkeypatch.setattr(
+        "app.services.profile.r2.generate_presigned_get_url",
+        lambda path, ttl_seconds=3600: f"https://signed.example/{path}?sig=xyz",
+    )
+
+    response = auth_client.get(
+        "/profile/me",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["avatar_url"] == f"https://signed.example/{storage_path}?sig=xyz"
+
+
+def test_get_me_passes_through_absolute_avatar_urls(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+) -> None:
+    """Defensive: if an absolute URL ever leaks into avatar_url (legacy /
+    test data), don't re-sign it — pass through."""
+    user_id = uuid4()
+    _stub_select(fake_sb, _profile_row(user_id, avatar_url="https://example.com/me.jpg"))
+
+    response = auth_client.get(
+        "/profile/me",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["avatar_url"] == "https://example.com/me.jpg"
+
+
+# --- POST /profile/avatar/upload-url ---------------------------------
+
+
+def test_avatar_upload_url_returns_user_scoped_path(
+    auth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    def fake_put(path: str, content_type: str, ttl_seconds: int = 600) -> str:
+        captured["path"] = path
+        captured["content_type"] = content_type
+        captured["ttl_seconds"] = ttl_seconds
+        return "https://r2.example/put?sig=avatar"
+
+    monkeypatch.setattr("app.services.profile.r2.generate_presigned_put_url", fake_put)
+
+    response = auth_client.post(
+        "/profile/avatar/upload-url",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"extension": "jpg"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["upload_url"] == "https://r2.example/put?sig=avatar"
+    assert body["storage_path"].startswith(f"users/{user_id}/avatars/")
+    assert body["storage_path"].endswith(".jpg")
+    assert captured["content_type"] == "image/jpeg"
+    assert captured["ttl_seconds"] == 600
+
+
+# --- PATCH /profile/avatar --------------------------------------------
+
+
+def test_patch_avatar_writes_storage_path_and_returns_signed_url(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = uuid4()
+    storage_path = f"users/{user_id}/avatars/abc.jpg"
+    _stub_update(fake_sb, [_profile_row(user_id, avatar_url=storage_path)])
+
+    monkeypatch.setattr("app.services.profile.r2.head_object", lambda _path: True)
+    monkeypatch.setattr(
+        "app.services.profile.r2.generate_presigned_get_url",
+        lambda path, ttl_seconds=3600: f"https://signed.example/{path}",
+    )
+
+    response = auth_client.patch(
+        "/profile/avatar",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"storage_path": storage_path},
+    )
+    assert response.status_code == 200, response.text
+    # DB write was the raw storage_path …
+    fake_sb.table.return_value.update.assert_called_with({"avatar_url": storage_path})
+    # … but the response surfaces a signed URL.
+    assert response.json()["avatar_url"] == f"https://signed.example/{storage_path}"
+
+
+def test_patch_avatar_rejects_other_users_path(
+    auth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = uuid4()
+    other = uuid4()
+    head = MagicMock(return_value=True)
+    monkeypatch.setattr("app.services.profile.r2.head_object", head)
+
+    response = auth_client.patch(
+        "/profile/avatar",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"storage_path": f"users/{other}/avatars/foo.jpg"},
+    )
+    assert response.status_code == 422
+    # Path check happens before R2 round-trip.
+    head.assert_not_called()
+
+
+def test_patch_avatar_missing_object_returns_422(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = uuid4()
+    monkeypatch.setattr("app.services.profile.r2.head_object", lambda _path: False)
+
+    response = auth_client.patch(
+        "/profile/avatar",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"storage_path": f"users/{user_id}/avatars/abc.jpg"},
+    )
+    assert response.status_code == 422
+    fake_sb.table.return_value.update.assert_not_called()
