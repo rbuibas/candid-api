@@ -28,12 +28,14 @@ envVarGroups:
         sync: false
       - key: R2_BUCKET
         sync: false
-      - key: FIREBASE_CREDENTIALS_JSON
+      - key: FIREBASE_SERVICE_ACCOUNT_B64
         sync: false
       - key: RESEND_API_KEY
         sync: false
       - key: RESEND_FROM_EMAIL
         sync: false
+      - key: DEV_ENDPOINTS_ENABLED
+        value: "false"
 
 services:
   - type: web

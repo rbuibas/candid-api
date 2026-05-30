@@ -21,8 +21,9 @@ Phase 0 deploy. The result: a public `/health` endpoint that returns `{"status":
    - Populate every key marked `sync: false` in `render.yaml`. The full list mirrors `.env.example`:
      - `SUPABASE_URL`, `SUPABASE_JWT_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`
      - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`
-     - `FIREBASE_CREDENTIALS_JSON` (paste the whole JSON as a single-line string)
+     - `FIREBASE_SERVICE_ACCOUNT_B64` (paste base64-encoded service-account JSON; generate with `base64 -i service-account.json`)
      - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`
+   - `DEV_ENDPOINTS_ENABLED` defaults to `false` in `render.yaml` and MUST stay false in prod.
    - For Phase 0 these are not actually used at runtime (clients are lazy), but having them ready avoids a redeploy when the first endpoint that needs them ships.
 
 4. **Apply the blueprint.** Render builds the Docker image from the `Dockerfile`, starts the web service, and schedules the three cron jobs.

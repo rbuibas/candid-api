@@ -25,10 +25,13 @@ class Settings(BaseSettings):
     r2_bucket: str | None = None
     r2_region: str = "auto"
 
-    firebase_credentials_json: str | None = None
+    firebase_service_account_b64: str | None = None
 
     resend_api_key: str | None = None
     resend_from_email: str | None = None
+
+    # Gates /dev/* routes. MUST be false in production.
+    dev_endpoints_enabled: bool = False
 
 
 @lru_cache

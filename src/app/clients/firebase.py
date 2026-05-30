@@ -1,5 +1,7 @@
-# Lazy Firebase Admin app for FCM push. Credentials JSON is loaded from env on first call.
+# Lazy Firebase Admin app for FCM push. Credentials are loaded from
+# FIREBASE_SERVICE_ACCOUNT_B64 (base64-encoded service-account JSON) on first call.
 
+import base64
 import json
 from typing import Any
 
@@ -17,9 +19,10 @@ def get_firebase_app() -> Any:
         return _app
 
     settings = get_settings()
-    if not settings.firebase_credentials_json:
-        raise RuntimeError("Firebase client requires FIREBASE_CREDENTIALS_JSON")
+    if not settings.firebase_service_account_b64:
+        raise RuntimeError("Firebase client requires FIREBASE_SERVICE_ACCOUNT_B64")
 
-    cred = credentials.Certificate(json.loads(settings.firebase_credentials_json))
+    raw = base64.b64decode(settings.firebase_service_account_b64)
+    cred = credentials.Certificate(json.loads(raw))
     _app = firebase_admin.initialize_app(cred)
     return _app
