@@ -337,7 +337,9 @@ def test_get_group_non_member_returns_404(auth_client: TestClient, fake_sb: Magi
 # --- DELETE /groups/{id} ---------------------------------------------
 
 
-def test_delete_group_non_creator_returns_403(fake_sb: MagicMock) -> None:
+def test_delete_group_non_creator_returns_403(
+    fake_sb: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     caller = uuid4()
     other_creator = uuid4()
     group_id = uuid4()
@@ -345,23 +347,55 @@ def test_delete_group_non_creator_returns_403(fake_sb: MagicMock) -> None:
     leaf = fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute  # noqa: E501
     leaf.return_value.data = {"created_by": str(other_creator)}
 
+    delete_prefix = MagicMock()
+    monkeypatch.setattr("app.services.groups.r2.delete_prefix", delete_prefix)
+
     with pytest.raises(groups_service.NotGroupCreatorError):
         groups_service.delete(fake_sb, caller, group_id)
 
-    # Hard delete must not have run.
+    # Hard delete must not have run; media purge must not have been touched.
     fake_sb.table.return_value.delete.assert_not_called()
+    delete_prefix.assert_not_called()
 
 
-def test_delete_group_creator_runs_cascade(fake_sb: MagicMock) -> None:
+def test_delete_group_creator_purges_media_then_deletes(
+    fake_sb: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     creator = uuid4()
     group_id = uuid4()
 
     leaf = fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute  # noqa: E501
     leaf.return_value.data = {"created_by": str(creator)}
 
+    delete_prefix = MagicMock(return_value=3)
+    monkeypatch.setattr("app.services.groups.r2.delete_prefix", delete_prefix)
+
     groups_service.delete(fake_sb, creator, group_id)
 
+    delete_prefix.assert_called_once_with(f"groups/{group_id}/")
     fake_sb.table.return_value.delete.return_value.eq.assert_called_with("id", str(group_id))
+
+
+def test_delete_group_aborts_when_media_purge_fails(
+    fake_sb: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If R2 deletion blows up, the DB cascade must NOT run — we'd rather
+    refuse the delete than orphan objects in the bucket."""
+    creator = uuid4()
+    group_id = uuid4()
+
+    leaf = fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute  # noqa: E501
+    leaf.return_value.data = {"created_by": str(creator)}
+
+    def boom(_prefix: str) -> int:
+        raise RuntimeError("R2 down")
+
+    monkeypatch.setattr("app.services.groups.r2.delete_prefix", boom)
+
+    with pytest.raises(RuntimeError, match="R2 down"):
+        groups_service.delete(fake_sb, creator, group_id)
+
+    fake_sb.table.return_value.delete.assert_not_called()
 
 
 def test_delete_group_missing_returns_404(fake_sb: MagicMock) -> None:

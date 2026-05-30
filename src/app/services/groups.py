@@ -16,6 +16,7 @@ from uuid import UUID
 
 from supabase import Client
 
+from app.clients import r2
 from app.models.group import (
     Group,
     GroupCreate,
@@ -68,14 +69,14 @@ def _is_member(sb: Client, user_id: UUID, group_id: UUID) -> bool:
 
 
 def _purge_group_media(sb: Client, group_id: UUID) -> None:
-    """Phase 3 will delete R2 objects for this group's posts.
+    """Delete every R2 object stored under this group's prefix.
 
-    Wired in here so the call site exists; left empty so a Phase 3 patch
-    only has to fill the body without touching the delete flow.
+    Runs before the DB cascade so a failure bubbles to the DELETE handler
+    and leaves the rows in place — we'd rather refuse the delete than
+    silently orphan media in R2.
     """
-    # TODO(Phase 3): list posts for group_id, delete corresponding R2 objects
-    # before the DB cascade removes the rows.
-    _ = (sb, group_id)
+    _ = sb  # reserved for future per-post deletion paths
+    r2.delete_prefix(f"groups/{group_id}/")
 
 
 def create(sb: Client, user_id: UUID, payload: GroupCreate) -> GroupCreateResponse:
