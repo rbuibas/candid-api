@@ -56,8 +56,8 @@ def _profile_row(user_id: UUID, **overrides: Any) -> dict[str, Any]:
 
 
 def _stub_select(fake_sb: MagicMock, row: dict[str, Any] | None) -> None:
-    """Configure the .table().select().eq().single().execute() chain."""
-    fake_sb.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = row  # noqa: E501
+    """Configure the .table().select().eq().maybe_single().execute() chain."""
+    fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value.data = row  # noqa: E501
 
 
 def _stub_update(fake_sb: MagicMock, rows: list[dict[str, Any]]) -> None:

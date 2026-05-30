@@ -25,7 +25,12 @@ from uuid import UUID
 import httpx
 import jwt
 import pytest
+from dotenv import load_dotenv
 from supabase import Client, create_client
+
+# Reads .env from cwd (or any parent); no-op if file is absent. Done at import
+# time so the env vars are in place before any fixture reads them.
+load_dotenv()
 
 REQUIRED_ENV = (
     "SUPABASE_URL",

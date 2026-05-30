@@ -108,3 +108,41 @@ def test_malformed_token_returns_401() -> None:
     with pytest.raises(HTTPException) as exc:
         _verify_jwt(_creds("not.a.jwt"), _settings())
     assert exc.value.status_code == 401
+
+
+# --- alg-detection branch -----------------------------------------------------
+
+
+def _craft_token_with_alg(alg: str, *, sub: str | None = None) -> str:
+    """Build a JWT-shaped string with an arbitrary header.alg, for exercising
+    the alg-detection branch without needing a real asymmetric key. All three
+    segments are valid base64url (PyJWT's header parser inspects all three);
+    the signature won't verify, but tests that get this far should reject the
+    token before the signature check based on alg or key-resolution."""
+    import base64
+    import json
+
+    def b64(d: dict[str, object]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+
+    header = b64({"alg": alg, "typ": "JWT"})
+    payload = b64({"sub": sub or str(uuid4()), "aud": "authenticated"})
+    sig = base64.urlsafe_b64encode(b"x" * 32).rstrip(b"=").decode()
+    return f"{header}.{payload}.{sig}"
+
+
+def test_unsupported_algorithm_returns_401() -> None:
+    token = _craft_token_with_alg("HS384")
+    with pytest.raises(HTTPException) as exc:
+        _verify_jwt(_creds(token), _settings())
+    assert exc.value.status_code == 401
+    assert "Unsupported" in exc.value.detail
+
+
+def test_asymmetric_alg_without_supabase_url_returns_500() -> None:
+    token = _craft_token_with_alg("ES256")
+    settings = Settings(supabase_jwt_secret=TEST_SECRET, supabase_url=None)
+    with pytest.raises(HTTPException) as exc:
+        _verify_jwt(_creds(token), settings)
+    assert exc.value.status_code == 500
+    assert "JWKS" in exc.value.detail

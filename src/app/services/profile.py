@@ -25,7 +25,7 @@ class EmptyPatchError(Exception):
 
 
 def get_for_user(sb: Client, user_id: UUID) -> Profile:
-    result = sb.table("profiles").select("*").eq("id", str(user_id)).single().execute()
+    result = sb.table("profiles").select("*").eq("id", str(user_id)).maybe_single().execute()
     if not result.data:
         raise ProfileNotFoundError()
     return Profile.model_validate(result.data)

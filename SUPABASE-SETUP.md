@@ -148,19 +148,24 @@ If any fail, the migration didn't fully apply — check the dashboard verificati
 
 ## H. End-to-end smoke test (post-deploy)
 
-1. **Supabase → Authentication → Users → Add user → "Send magic link"** → enter your email.
-2. Open the email in your inbox; the link should look like `candid://...#access_token=...&refresh_token=...&...`.
-3. **Don't click the link** (it won't resolve without the mobile app). Instead, in the Supabase dashboard, go to **Authentication → Users → click your user row → copy the `access_token`** (or use the SQL editor to query `auth.sessions`).
-4. Test the protected endpoint:
+The "Add user" flow sends an *invite* link (`type=invite`), not a magic link — so there's no `access_token` fragment to copy. Supabase also doesn't persist raw JWTs in `auth.sessions`. Mint a token directly instead:
+
+1. **Create a user** via Supabase → Authentication → Users → Add user → enter your email. (No need to click the invite link.)
+2. **Mint a JWT** from the repo root:
+   ```bash
+   uv run python scripts/mint_smoke_token.py --email you@example.com
+   # Prints the user ID and a 1-hour JWT.
+   ```
+3. Test the protected endpoint:
    ```bash
    curl -H "Authorization: Bearer <jwt>" https://candid-api-7o72.onrender.com/profile/me
    # Expected: {"id":"...","display_name":null,"avatar_url":null,"timezone":"UTC", ...}
    ```
-5. Test that auth is required:
+4. Test that auth is required:
    ```bash
    curl https://candid-api-7o72.onrender.com/profile/me
    # Expected: {"detail":"Missing Authorization header"} with HTTP 401
    ```
-6. **Table Editor → profiles**: confirm a row exists for your user with `timezone='UTC'`.
+5. **Table Editor → profiles**: confirm a row exists for your user with `timezone='UTC'`.
 
 That's Phase 1 backend acceptance cleared. The mobile half (magic-link UI, deep-link handler, profile sync) lands in a follow-up plan and completes Phase 1.

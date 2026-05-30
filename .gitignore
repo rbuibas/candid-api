@@ -26,3 +26,6 @@ Thumbs.db
 
 # Claude Code local workspace (worktrees, session state)
 .claude/
+
+# Supabase CLI local cache (linked project info, downloaded binaries)
+supabase/.temp/
