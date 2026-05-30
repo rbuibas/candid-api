@@ -12,6 +12,7 @@ from supabase import Client
 
 from app.models.group import Group, GroupMember, GroupWithLifecycle
 from app.services import groups as groups_service
+from app.services import profile as profile_service
 
 _PG_UNIQUE_VIOLATION = "23505"
 
@@ -42,7 +43,7 @@ def list_for_group(sb: Client, user_id: UUID, group_id: UUID) -> list[GroupMembe
             GroupMember(
                 user_id=row["user_id"],
                 display_name=profile.get("display_name"),
-                avatar_url=profile.get("avatar_url"),
+                avatar_url=profile_service.resolve_avatar_url(profile.get("avatar_url")),
                 joined_at=row["joined_at"],
             )
         )
