@@ -11,11 +11,19 @@ The flow per /docs/03-technical-architecture.md §3:
    Idempotent on post_id: a re-call from the same user for the same
    (post_id, group_id) returns the existing row at 200.
 
+Phase 4 extension — when kind=prompt, confirm enforces the prompt window
+anchored on `dispatched_at` (server-authoritative). Receipt past
+late_deadline returns 410; receipt past on-time but within late_window marks
+the post is_late=true and flips the prompt to status='late'. The
+posts_prompt_id_unique partial index guards against a second confirm
+racing for the same prompt.
+
 Service-role bypasses RLS at this layer, so we manually scope every read
 by membership. RLS is still the second line of defence for the rare case
 this layer is reached with a different key.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -26,11 +34,15 @@ from app.clients import r2
 from app.models.post import (
     ConfirmPostRequest,
     Post,
+    PostKind,
     PostMediaType,
     PostWithMediaUrl,
     UploadUrlRequest,
     UploadUrlResponse,
 )
+from app.services.prompts import compute_deadlines
+
+log = logging.getLogger(__name__)
 
 _PG_UNIQUE_VIOLATION = "23505"
 _UPLOAD_TTL_SECONDS = 600
@@ -67,6 +79,26 @@ class StoragePathMismatchError(Exception):
     Defense-in-depth against a forged confirm body that points HeadObject at
     a different object the caller happens to have access to.
     """
+
+
+class PromptIdRequiredError(Exception):
+    """confirm body has kind=prompt but no prompt_id. Router maps to 422."""
+
+
+class PromptNotAccessibleError(Exception):
+    """Prompt does not exist, is owned by another user, or its group_id does
+    not match the confirm payload. Router maps to 403 (anti-leak)."""
+
+
+class PromptNotActiveError(Exception):
+    """Prompt is not in status='active' (already responded/late/missed/scheduled),
+    OR a second confirm raced and lost on the prompt_id unique index.
+    Router maps to 409."""
+
+
+class PromptExpiredError(Exception):
+    """Server receipt time is past the late_deadline. No post is inserted;
+    the expirer will mark the prompt missed on its next tick. Router maps to 410."""
 
 
 def _post_storage_path(group_id: UUID, post_id: UUID, extension: str) -> str:
@@ -133,9 +165,42 @@ def create_upload_url(
     )
 
 
+def _load_active_prompt(
+    sb: Client,
+    user_id: UUID,
+    group_id: UUID,
+    prompt_id: UUID,
+) -> dict:
+    """Fetch a prompt joined with its group's window settings.
+
+    Raises PromptNotAccessibleError if the row doesn't exist, isn't the
+    caller's, or its group_id mismatches the confirm payload.
+    Raises PromptNotActiveError if the row is no longer status='active' or
+    dispatched_at is null.
+    """
+    result = (
+        sb.table("prompts")
+        .select("*, groups(response_window_seconds, late_window_seconds)")
+        .eq("id", str(prompt_id))
+        .maybe_single()
+        .execute()
+    )
+    if not result or not result.data:
+        raise PromptNotAccessibleError()
+    row = result.data
+    if row["user_id"] != str(user_id) or row["group_id"] != str(group_id):
+        raise PromptNotAccessibleError()
+    if row["status"] != "active" or row.get("dispatched_at") is None:
+        raise PromptNotActiveError()
+    return row
+
+
 def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
     # 1. Idempotency: existing row for this post_id wins, provided the caller
     #    owns it and the group matches. Mismatches → 403 (tampered re-call).
+    #    For prompt confirms we deliberately skip the post-insert status
+    #    flip below — the prompt is already in its terminal state from the
+    #    first call.
     existing = _select_post(sb, payload.post_id)
     if existing is not None:
         if existing["user_id"] != str(user_id) or existing["group_id"] != str(payload.group_id):
@@ -155,7 +220,25 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
     if not r2.head_object(payload.storage_path):
         raise MediaObjectMissingError()
 
-    # 5. visible_at = now + group.view_delay_seconds.
+    # 5. Prompt-window enforcement (kind=prompt only). Lateness is computed
+    #    from server-receipt time vs. dispatched_at deadlines — never
+    #    captured_at, never client clock.
+    is_late = False
+    prompt_row: dict | None = None
+    if payload.kind is PostKind.PROMPT:
+        if payload.prompt_id is None:
+            raise PromptIdRequiredError()
+        prompt_row = _load_active_prompt(sb, user_id, payload.group_id, payload.prompt_id)
+        dispatched_at = datetime.fromisoformat(prompt_row["dispatched_at"]).astimezone(UTC)
+        rws = int(prompt_row["groups"]["response_window_seconds"])
+        lws = int(prompt_row["groups"]["late_window_seconds"])
+        on_time, late = compute_deadlines(dispatched_at, rws, lws)
+        now = datetime.now(UTC)
+        if now > late:
+            raise PromptExpiredError()
+        is_late = now > on_time
+
+    # 6. visible_at = now + group.view_delay_seconds.
     group_row = (
         sb.table("groups")
         .select("view_delay_seconds")
@@ -182,27 +265,48 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
         "storage_path": payload.storage_path,
         "duration_seconds": payload.duration_seconds,
         "captured_at": payload.captured_at.isoformat(),
-        "is_late": False,
+        "is_late": is_late,
         "visible_at": visible_at.isoformat(),
         "latitude": payload.latitude,
         "longitude": payload.longitude,
         "location_accuracy_meters": accuracy_int,
     }
 
-    # 6. Insert. Concurrent confirms race on the posts.id PK; treat the
-    #    unique_violation as the idempotent case and re-fetch.
+    # 7. Insert. Two possible 23505 (unique_violation) shapes:
+    #    a) same post_id raced → idempotent re-fetch
+    #    b) different post_id, same prompt_id (posts_prompt_id_unique) →
+    #       another confirm beat us; surface as PromptNotActiveError.
     try:
         insert_result = sb.table("posts").insert(insert_payload).execute()
     except APIError as e:
         if e.code != _PG_UNIQUE_VIOLATION:
             raise
         racing = _select_post(sb, payload.post_id)
-        if racing is None:
-            raise
-        return Post.model_validate(racing)
+        if racing is not None:
+            return Post.model_validate(racing)
+        if payload.kind is PostKind.PROMPT:
+            raise PromptNotActiveError() from e
+        raise
 
     if not insert_result.data:
         raise RuntimeError("posts insert returned no row")
+
+    # 8. Best-effort prompt status flip. The partial unique index on
+    #    posts.prompt_id guarantees a re-confirm collides on insert, so a
+    #    silently-failing flip here only affects what /prompts/active
+    #    returns until the next read — not correctness.
+    if payload.kind is PostKind.PROMPT and payload.prompt_id is not None:
+        new_status = "late" if is_late else "responded"
+        try:
+            sb.table("prompts").update({"status": new_status}).eq(
+                "id", str(payload.prompt_id)
+            ).execute()
+        except Exception:
+            log.exception(
+                "prompt status flip failed for prompt_id=%s; post inserted",
+                payload.prompt_id,
+            )
+
     return Post.model_validate(insert_result.data[0])
 
 

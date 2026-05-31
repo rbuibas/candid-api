@@ -3,13 +3,18 @@
 Thin handlers — the work lives in services/posts.py. The error translation
 table:
 
-- GroupNotFoundError       → 404 (caller not in group, or no such group)
-- PostNotFoundError        → 404 (no such post / tombstoned)
-- PostNotAccessibleError   → 403 (post exists, caller not in its group;
-                                   or tampered re-confirm)
-- MediaObjectMissingError  → 422 (client never PUT the bytes)
-- StoragePathMismatchError → 422 (storage_path doesn't match the server's
-                                   minted shape)
+- GroupNotFoundError        → 404 (caller not in group, or no such group)
+- PostNotFoundError         → 404 (no such post / tombstoned)
+- PostNotAccessibleError    → 403 (post exists, caller not in its group;
+                                    or tampered re-confirm)
+- MediaObjectMissingError   → 422 (client never PUT the bytes)
+- StoragePathMismatchError  → 422 (storage_path doesn't match the server's
+                                    minted shape)
+- PromptIdRequiredError     → 422 (kind=prompt but prompt_id missing)
+- PromptNotAccessibleError  → 403 (prompt missing / not caller's / group mismatch)
+- PromptNotActiveError      → 409 (prompt already responded / late / missed,
+                                    or another confirm raced and won)
+- PromptExpiredError        → 410 (server receipt past late_deadline; no post)
 """
 
 from uuid import UUID
@@ -73,6 +78,26 @@ def confirm_post(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Media object not found at storage_path",
+        ) from e
+    except posts_service.PromptIdRequiredError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="prompt_id is required when kind=prompt",
+        ) from e
+    except posts_service.PromptNotAccessibleError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot confirm this prompt",
+        ) from e
+    except posts_service.PromptNotActiveError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Prompt is not active",
+        ) from e
+    except posts_service.PromptExpiredError as e:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Prompt window has expired",
         ) from e
 
 

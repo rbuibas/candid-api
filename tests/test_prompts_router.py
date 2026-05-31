@@ -78,10 +78,11 @@ def auth_client(fake_sb: MagicMock) -> TestClient:
 
 def _stub_active_list(fake_sb: MagicMock, rows: list[dict[str, Any]]) -> None:
     """Configure the .table().select().eq().eq().not_.is_().execute() chain."""
-    chain = fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.not_.is_.return_value
+    chain = fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value
+    leaf = chain.not_.is_.return_value
     result = MagicMock()
     result.data = rows
-    chain.execute.return_value = result
+    leaf.execute.return_value = result
 
 
 def _stub_single_lookup(fake_sb: MagicMock, row: dict[str, Any] | None) -> None:
