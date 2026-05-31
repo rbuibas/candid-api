@@ -1,19 +1,40 @@
-"""Prompts service — pure timing helpers (Phase 4 Commit 5).
+"""Prompts service — timing helpers + read paths.
 
-This module starts as pure helpers around timezones and deadlines so the
-generator/dispatcher/expirer + the /prompts router can all share the same
-math. DB calls (get_active_for_user, get_for_user, fire_prompt_now) land in
-later commits in this same file.
+Pure helpers (local_window_to_utc_ranges, compute_deadlines, compute_state)
+are shared by the read endpoints, the workers, and the confirm extension.
 
-Window-wrap is the easiest place to get cute and wrong: when daily_window_end
-< daily_window_start the window crosses midnight, producing two UTC ranges
-for one local "day."
+Read paths (get_active_for_user, get_for_user) join `groups` to fold the
+response/late windows into pre-computed deadlines and a UI state, so the
+client renders countdowns without recomputing lateness.
 """
 
 from datetime import UTC, date, datetime, time, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from app.models.prompt import PromptUIState
+from supabase import Client
+
+from app.models.prompt import (
+    PromptMediaType,
+    PromptUIState,
+    PromptView,
+)
+
+
+class PromptNotFoundError(Exception):
+    """No prompt row with this id."""
+
+
+class PromptNotAccessibleError(Exception):
+    """Prompt exists but the caller doesn't own it."""
+
+
+class PromptNotDispatchedError(Exception):
+    """Prompt exists and is owned by the caller but `dispatched_at` is still null.
+
+    Returned for /prompts/{id} when status='scheduled': the client should not
+    see a deadline yet. Router maps to 409.
+    """
 
 
 def local_window_to_utc_ranges(
@@ -88,3 +109,88 @@ def compute_state(
     if now <= late:
         return PromptUIState.LATE
     return PromptUIState.MISSED
+
+
+# --- Read paths -------------------------------------------------------
+
+
+def _parse_dt(raw: str) -> datetime:
+    """Parse a Postgres timestamptz string into an aware UTC datetime.
+
+    PostgREST returns values like "2026-05-30T12:00:00+00:00"; fromisoformat
+    handles the offset correctly. astimezone(UTC) normalizes any other offset.
+    """
+    return datetime.fromisoformat(raw).astimezone(UTC)
+
+
+def _build_view(row: dict, now: datetime) -> PromptView:
+    """Project a joined prompts+groups row into the PromptView read shape."""
+    group = row["groups"]
+    dispatched = _parse_dt(row["dispatched_at"])
+    rws = int(group["response_window_seconds"])
+    lws = int(group["late_window_seconds"])
+    on_time, late = compute_deadlines(dispatched, rws, lws)
+    return PromptView(
+        id=UUID(row["id"]),
+        group_id=UUID(row["group_id"]),
+        media_type=PromptMediaType(row["media_type"]),
+        target_video_length_seconds=row.get("target_video_length_seconds"),
+        dispatched_at=dispatched,
+        on_time_deadline=on_time,
+        late_deadline=late,
+        state=compute_state(now, dispatched, rws, lws),
+    )
+
+
+def get_active_for_user(sb: Client, user_id: UUID) -> list[PromptView]:
+    """All actionable prompts for the caller across groups.
+
+    `actionable` here means the DB row is status='active' (dispatcher has
+    fired the push) and the computed UI state is not yet `missed`. A prompt
+    whose late_deadline has passed but the expirer hasn't run yet is filtered
+    out — the client never sees something it can't act on.
+    """
+    result = (
+        sb.table("prompts")
+        .select("*, groups(response_window_seconds, late_window_seconds)")
+        .eq("user_id", str(user_id))
+        .eq("status", "active")
+        .not_.is_("dispatched_at", "null")
+        .execute()
+    )
+    now = datetime.now(UTC)
+    out: list[PromptView] = []
+    for row in result.data or []:
+        view = _build_view(row, now)
+        if view.state is PromptUIState.MISSED:
+            continue
+        out.append(view)
+    return out
+
+
+def get_for_user(sb: Client, user_id: UUID, prompt_id: UUID) -> PromptView:
+    """Single prompt lookup. Manual user-scoping — service-role bypasses RLS.
+
+    Distinguishes:
+      - not found → PromptNotFoundError (404)
+      - exists but not caller's → PromptNotAccessibleError (403)
+      - exists, caller's, still scheduled → PromptNotDispatchedError (409)
+      - otherwise → PromptView with a computed UI `state` (which may be MISSED
+        for a row the expirer hasn't yet caught up to, or a sensible state
+        for a DB row already in 'responded'/'late'/'missed')
+    """
+    result = (
+        sb.table("prompts")
+        .select("*, groups(response_window_seconds, late_window_seconds)")
+        .eq("id", str(prompt_id))
+        .maybe_single()
+        .execute()
+    )
+    if not result or not result.data:
+        raise PromptNotFoundError()
+    row = result.data
+    if row["user_id"] != str(user_id):
+        raise PromptNotAccessibleError()
+    if row.get("dispatched_at") is None:
+        raise PromptNotDispatchedError()
+    return _build_view(row, datetime.now(UTC))
