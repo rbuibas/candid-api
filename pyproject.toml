@@ -18,6 +18,9 @@ dependencies = [
     # but has nothing to fall back to on Windows or in slim Docker images.
     # Bundle the IANA database so per-user local-window math works everywhere.
     "tzdata>=2025.1",
+    # APScheduler boots the three Phase 4 background jobs (generator,
+    # dispatcher, expirer) in a single Render Background Worker.
+    "apscheduler>=3.10",
 ]
 
 [dependency-groups]

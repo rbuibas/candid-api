@@ -47,32 +47,15 @@ services:
     envVars:
       - fromGroup: candid-api-env
 
-  - type: cron
-    name: candid-generator
+  # Single Background Worker — APScheduler runs generator (60m + startup),
+  # dispatcher (60s), and expirer (60s) jobs in-process. See workers/main.py
+  # for the rationale (one process is cheaper than three crons and keeps the
+  # jobs hot in memory).
+  - type: worker
+    name: candid-workers
     runtime: docker
     region: frankfurt
     plan: starter
-    schedule: "0 * * * *"
-    dockerCommand: uv run python -m app.workers.generator
-    envVars:
-      - fromGroup: candid-api-env
-
-  - type: cron
-    name: candid-dispatcher
-    runtime: docker
-    region: frankfurt
-    plan: starter
-    schedule: "* * * * *"
-    dockerCommand: uv run python -m app.workers.dispatcher
-    envVars:
-      - fromGroup: candid-api-env
-
-  - type: cron
-    name: candid-expirer
-    runtime: docker
-    region: frankfurt
-    plan: starter
-    schedule: "* * * * *"
-    dockerCommand: uv run python -m app.workers.expirer
+    dockerCommand: uv run python -m app.workers.main
     envVars:
       - fromGroup: candid-api-env

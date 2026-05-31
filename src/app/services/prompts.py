@@ -1,4 +1,4 @@
-"""Prompts service — timing helpers + read paths.
+"""Prompts service — timing helpers + read paths + dev fire-prompt.
 
 Pure helpers (local_window_to_utc_ranges, compute_deadlines, compute_state)
 are shared by the read endpoints, the workers, and the confirm extension.
@@ -6,15 +6,23 @@ are shared by the read endpoints, the workers, and the confirm extension.
 Read paths (get_active_for_user, get_for_user) join `groups` to fold the
 response/late windows into pre-computed deadlines and a UI state, so the
 client renders countdowns without recomputing lateness.
+
+fire_prompt_now is the impl for POST /dev/fire-prompt — creates a
+status='active', dispatched_at=now prompt for the caller and pushes
+immediately. The router gates the endpoint behind DEV_ENDPOINTS_ENABLED.
 """
 
+import random
 from datetime import UTC, date, datetime, time, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from supabase import Client
 
+from app.clients import firebase
 from app.models.prompt import (
+    FirePromptRequest,
+    Prompt,
     PromptMediaType,
     PromptUIState,
     PromptView,
@@ -34,6 +42,13 @@ class PromptNotDispatchedError(Exception):
 
     Returned for /prompts/{id} when status='scheduled': the client should not
     see a deadline yet. Router maps to 409.
+    """
+
+
+class GroupNotFoundError(Exception):
+    """Caller is not a member of the requested group, or no such group.
+
+    Used by fire_prompt_now. Routers map to 404 (anti-leak).
     """
 
 
@@ -194,3 +209,100 @@ def get_for_user(sb: Client, user_id: UUID, prompt_id: UUID) -> PromptView:
     if row.get("dispatched_at") is None:
         raise PromptNotDispatchedError()
     return _build_view(row, datetime.now(UTC))
+
+
+# --- Dev-only fire-prompt ---------------------------------------------
+
+
+_FIRE_PUSH_TITLE = "Time to capture"
+
+
+def _is_member(sb: Client, user_id: UUID, group_id: UUID) -> bool:
+    result = (
+        sb.table("group_members")
+        .select("id")
+        .eq("group_id", str(group_id))
+        .eq("user_id", str(user_id))
+        .maybe_single()
+        .execute()
+    )
+    return bool(result and result.data)
+
+
+def fire_prompt_now(
+    sb: Client,
+    user_id: UUID,
+    payload: FirePromptRequest,
+    *,
+    rng: random.Random | None = None,
+) -> Prompt:
+    """Create an immediately-dispatched prompt for the caller and push it.
+
+    Mirrors what the generator+dispatcher would produce, condensed into one
+    request for hand-testing without waiting on cron.
+    """
+    rng = rng or random.Random()
+
+    if not _is_member(sb, user_id, payload.group_id):
+        raise GroupNotFoundError()
+
+    group = (
+        sb.table("groups")
+        .select("max_video_length_seconds, response_window_seconds, late_window_seconds")
+        .eq("id", str(payload.group_id))
+        .maybe_single()
+        .execute()
+    )
+    if not group or not group.data:
+        raise GroupNotFoundError()
+    g = group.data
+
+    profile = (
+        sb.table("profiles").select("timezone").eq("id", str(user_id)).maybe_single().execute()
+    )
+    tz = (profile.data or {}).get("timezone", "UTC") if profile else "UTC"
+    now = datetime.now(UTC)
+    local_today = now.astimezone(ZoneInfo(tz)).date()
+
+    media_type = payload.media_type or rng.choice([PromptMediaType.PHOTO, PromptMediaType.VIDEO])
+    target_video: int | None = None
+    if media_type is PromptMediaType.VIDEO:
+        max_video = int(g["max_video_length_seconds"])
+        target_video = rng.randint(3, max_video) if max_video >= 3 else max_video
+
+    row = {
+        "id": str(uuid4()),
+        "group_id": str(payload.group_id),
+        "user_id": str(user_id),
+        "scheduled_at": now.isoformat(),
+        "dispatched_at": now.isoformat(),
+        "local_date": local_today.isoformat(),
+        "media_type": media_type.value,
+        "target_video_length_seconds": target_video,
+        "status": "active",
+    }
+    inserted = sb.table("prompts").insert(row).execute()
+    if not inserted.data:
+        raise RuntimeError("prompts insert returned no row")
+    saved = inserted.data[0]
+
+    devices = (
+        sb.table("devices").select("fcm_token").eq("user_id", str(user_id)).execute().data or []
+    )
+    tokens = [d["fcm_token"] for d in devices]
+    if tokens:
+        data: dict = {
+            "prompt_id": saved["id"],
+            "group_id": saved["group_id"],
+            "media_type": saved["media_type"],
+            "dispatched_at": saved["dispatched_at"],
+            "response_window_seconds": g["response_window_seconds"],
+            "late_window_seconds": g["late_window_seconds"],
+        }
+        if target_video is not None:
+            data["target_video_length_seconds"] = target_video
+        result = firebase.send_push(tokens, data, title=_FIRE_PUSH_TITLE, body="")
+        if result.invalid_tokens:
+            sb.table("devices").delete().in_("fcm_token", result.invalid_tokens).execute()
+
+    return Prompt.model_validate(saved)
