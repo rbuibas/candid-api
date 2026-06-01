@@ -310,6 +310,25 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
     return Post.model_validate(insert_result.data[0])
 
 
+def get_my_photobooth_post(sb: Client, user_id: UUID, group_id: UUID) -> PostWithMediaUrl | None:
+    """Return the caller's photobooth strip post for this group, or None if not done yet."""
+    result = (
+        sb.table("posts")
+        .select("*")
+        .eq("group_id", str(group_id))
+        .eq("user_id", str(user_id))
+        .eq("kind", "photobooth")
+        .is_("deleted_at", "null")
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+    post = Post.model_validate(result.data[0])
+    media_url = r2.generate_presigned_get_url(post.storage_path, ttl_seconds=_DOWNLOAD_TTL_SECONDS)
+    return PostWithMediaUrl(**post.model_dump(), media_url=media_url)
+
+
 def get_post(sb: Client, user_id: UUID, post_id: UUID) -> PostWithMediaUrl:
     row = _select_post(sb, post_id)
     if row is None:

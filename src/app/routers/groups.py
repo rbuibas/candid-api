@@ -12,8 +12,10 @@ from app.models.group import (
     GroupWithLifecycle,
     JoinGroupRequest,
 )
+from app.models.post import PostWithMediaUrl
 from app.services import groups as groups_service
 from app.services import members as members_service
+from app.services import posts as posts_service
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -48,6 +50,21 @@ def join_group(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invite code not found or inactive",
         ) from e
+
+
+@router.get("/{group_id}/photobooth/me", response_model=PostWithMediaUrl)
+def get_my_photobooth_post(
+    group_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    sb: Client = Depends(get_supabase),
+) -> PostWithMediaUrl:
+    post = posts_service.get_my_photobooth_post(sb, user_id, group_id)
+    if post is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No photobooth post found for this user in this group",
+        )
+    return post
 
 
 @router.get("/{group_id}", response_model=GroupWithLifecycle)
