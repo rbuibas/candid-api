@@ -338,3 +338,45 @@ def get_post(sb: Client, user_id: UUID, post_id: UUID) -> PostWithMediaUrl:
         raise PostNotAccessibleError()
     media_url = r2.generate_presigned_get_url(post.storage_path, ttl_seconds=_DOWNLOAD_TTL_SECONDS)
     return PostWithMediaUrl(**post.model_dump(), media_url=media_url)
+
+
+def delete_post(sb: Client, user_id: UUID, post_id: UUID) -> None:
+    """Author-only soft delete: tombstone the row, then hard-delete R2 objects.
+
+    Idempotent on already-deleted: ``_select_post`` filters
+    ``deleted_at IS NULL``, so a re-delete of a tombstoned (or never-existed)
+    post raises PostNotFoundError → 404. A non-author raises
+    PostNotAccessibleError → 403.
+
+    The tombstone UPDATE is itself guarded by ``deleted_at IS NULL`` so a
+    concurrent double-delete can't double-fire the R2 purge; the loser of
+    that race gets 0 rows back and surfaces as 404.
+
+    R2 deletion is best-effort: the row is already tombstoned (invisible to
+    the feed), so a transient R2 error is logged, not propagated — re-running
+    delete won't help since the row is gone from the visible set.
+    """
+    row = _select_post(sb, post_id)
+    if row is None:
+        raise PostNotFoundError()
+    if row["user_id"] != str(user_id):
+        raise PostNotAccessibleError()
+
+    update_result = (
+        sb.table("posts")
+        .update({"deleted_at": datetime.now(UTC).isoformat()})
+        .eq("id", str(post_id))
+        .is_("deleted_at", "null")
+        .execute()
+    )
+    if not update_result.data:
+        # Lost a double-delete race — another request tombstoned it first.
+        raise PostNotFoundError()
+
+    for path in (row.get("storage_path"), row.get("thumbnail_path")):
+        if not path:
+            continue
+        try:
+            r2.delete_object(path)
+        except Exception:
+            log.exception("R2 delete failed for path=%s during post delete", path)

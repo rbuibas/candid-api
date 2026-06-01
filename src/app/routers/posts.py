@@ -19,7 +19,7 @@ table:
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from supabase import Client
 
 from app.auth.jwt import get_current_user_id
@@ -119,3 +119,24 @@ def get_post(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not a member of this post's group",
         ) from e
+
+
+@router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_post(
+    post_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    sb: Client = Depends(get_supabase),
+) -> Response:
+    try:
+        posts_service.delete_post(sb, user_id, post_id)
+    except posts_service.PostNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Post not found",
+        ) from e
+    except posts_service.PostNotAccessibleError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the author can delete this post",
+        ) from e
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

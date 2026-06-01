@@ -80,6 +80,50 @@ class PostWithMediaUrl(Post):
     media_url: str
 
 
+class PostAuthor(BaseModel):
+    """Minimal author projection embedded in a feed item.
+
+    `avatar_url` is resolved to a fresh signed GET URL (same convention as
+    the members list), not the raw R2 key.
+    """
+
+    user_id: UUID
+    display_name: str | None = None
+    avatar_url: str | None = None
+
+
+class FeedItem(BaseModel):
+    """A single feed entry.
+
+    Deliberately omits the internal R2 keys (`storage_path` /
+    `thumbnail_path`) — the client only ever sees short-lived signed URLs.
+    Field set matches the Phase 5 contract addendum.
+    """
+
+    id: UUID
+    group_id: UUID
+    prompt_id: UUID | None = None
+    user_id: UUID
+    kind: PostKind
+    media_type: PostMediaType
+    duration_seconds: int | None = None
+    captured_at: datetime
+    is_late: bool
+    visible_at: datetime
+    media_url: str
+    thumbnail_url: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    location_accuracy_meters: int | None = None
+    created_at: datetime
+    author: PostAuthor
+
+
+class FeedPage(BaseModel):
+    items: list[FeedItem]
+    next_cursor: str | None = None
+
+
 class AvatarUploadUrlRequest(BaseModel):
     extension: str = Field(min_length=1, max_length=8, pattern=_EXTENSION_PATTERN)
 
