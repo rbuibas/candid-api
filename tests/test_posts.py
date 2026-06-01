@@ -108,10 +108,12 @@ def _stub_r2(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     put = MagicMock(return_value="https://r2.example/put?sig=abc")
     get = MagicMock(return_value="https://r2.example/get?sig=def")
     head = MagicMock(return_value=True)
+    delete = MagicMock(return_value=None)
     monkeypatch.setattr("app.services.posts.r2.generate_presigned_put_url", put)
     monkeypatch.setattr("app.services.posts.r2.generate_presigned_get_url", get)
     monkeypatch.setattr("app.services.posts.r2.head_object", head)
-    return {"put": put, "get": get, "head": head}
+    monkeypatch.setattr("app.services.posts.r2.delete_object", delete)
+    return {"put": put, "get": get, "head": head, "delete": delete}
 
 
 # --- POST /posts/upload-url ------------------------------------------
@@ -482,3 +484,166 @@ def test_get_post_non_member_returns_403(fake_sb: MagicMock) -> None:
 
     with pytest.raises(posts_service.PostNotAccessibleError):
         posts_service.get_post(fake_sb, user_id, post_id)
+
+
+# --- DELETE /posts/{id} ----------------------------------------------
+
+
+def _wire_delete_chains(
+    fake_sb: MagicMock,
+    *,
+    existing_post: dict | None,
+    update_rows: list | None,
+) -> None:
+    """Configure the two posts chains delete_post() walks.
+
+    1. _select_post (deleted_at IS NULL):
+         .table().select().eq().is_().maybe_single().execute()
+    2. tombstone UPDATE (guarded by deleted_at IS NULL):
+         .table().update().eq().is_().execute()
+    """
+    select_leaf = fake_sb.table.return_value.select.return_value.eq.return_value.is_.return_value.maybe_single.return_value.execute  # noqa: E501
+    sel = MagicMock()
+    sel.data = existing_post
+    select_leaf.return_value = sel
+
+    upd = MagicMock()
+    upd.data = update_rows
+    fake_sb.table.return_value.update.return_value.eq.return_value.is_.return_value.execute.return_value = upd  # noqa: E501
+
+
+def test_delete_post_happy_path_tombstones_and_purges_r2(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    row = _post_row(
+        post_id,
+        user_id,
+        group_id,
+        thumbnail_path=f"groups/{group_id}/posts/{post_id}/thumb.jpg",
+    )
+    _wire_delete_chains(fake_sb, existing_post=row, update_rows=[row])
+
+    posts_service.delete_post(fake_sb, user_id, post_id)
+
+    # Tombstone UPDATE sets deleted_at.
+    update_call = fake_sb.table.return_value.update.call_args
+    assert update_call is not None
+    assert "deleted_at" in update_call.args[0]
+
+    # Both R2 objects hard-deleted (media + thumbnail).
+    deleted_paths = {c.args[0] for c in _stub_r2["delete"].call_args_list}
+    assert deleted_paths == {row["storage_path"], row["thumbnail_path"]}
+
+
+def test_delete_post_without_thumbnail_only_deletes_media(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    row = _post_row(post_id, user_id, group_id, thumbnail_path=None)
+    _wire_delete_chains(fake_sb, existing_post=row, update_rows=[row])
+
+    posts_service.delete_post(fake_sb, user_id, post_id)
+
+    _stub_r2["delete"].assert_called_once_with(row["storage_path"])
+
+
+def test_delete_post_non_author_raises_forbidden(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    real_owner = uuid4()
+    attacker = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    row = _post_row(post_id, real_owner, group_id)
+    _wire_delete_chains(fake_sb, existing_post=row, update_rows=[row])
+
+    with pytest.raises(posts_service.PostNotAccessibleError):
+        posts_service.delete_post(fake_sb, attacker, post_id)
+
+    # Neither tombstone nor R2 delete should fire for a non-author.
+    fake_sb.table.return_value.update.assert_not_called()
+    _stub_r2["delete"].assert_not_called()
+
+
+def test_delete_post_already_deleted_raises_not_found(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    # _select_post filters deleted_at IS NULL, so a tombstoned/absent post
+    # comes back as None → 404.
+    _wire_delete_chains(fake_sb, existing_post=None, update_rows=None)
+
+    with pytest.raises(posts_service.PostNotFoundError):
+        posts_service.delete_post(fake_sb, uuid4(), uuid4())
+
+    fake_sb.table.return_value.update.assert_not_called()
+    _stub_r2["delete"].assert_not_called()
+
+
+def test_delete_post_lost_race_raises_not_found(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    # Row was visible at select time but a concurrent delete tombstoned it
+    # before our guarded UPDATE → 0 rows affected → 404, no R2 purge.
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    row = _post_row(post_id, user_id, group_id)
+    _wire_delete_chains(fake_sb, existing_post=row, update_rows=[])
+
+    with pytest.raises(posts_service.PostNotFoundError):
+        posts_service.delete_post(fake_sb, user_id, post_id)
+
+    _stub_r2["delete"].assert_not_called()
+
+
+def test_delete_post_route_returns_204(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    row = _post_row(post_id, user_id, group_id)
+    _wire_delete_chains(fake_sb, existing_post=row, update_rows=[row])
+
+    response = auth_client.delete(
+        f"/posts/{post_id}",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+    )
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+
+
+def test_delete_post_route_non_author_returns_403(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    attacker = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    row = _post_row(post_id, uuid4(), group_id)
+    _wire_delete_chains(fake_sb, existing_post=row, update_rows=[row])
+
+    response = auth_client.delete(
+        f"/posts/{post_id}",
+        headers={"Authorization": f"Bearer {_mint(attacker)}"},
+    )
+    assert response.status_code == 403, response.text
