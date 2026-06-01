@@ -3,7 +3,10 @@
 
 import base64
 import json
+import logging
 from typing import Any, NamedTuple
+
+logger = logging.getLogger(__name__)
 
 import firebase_admin
 from firebase_admin import credentials, messaging
@@ -69,6 +72,19 @@ def send_push(
             messaging.UnregisteredError | messaging.SenderIdMismatchError,
         ):
             invalid.append(tokens[i])
+
+    logger.info(
+        "FCM multicast: tokens=%d success=%d failure=%d invalid=%d",
+        len(tokens),
+        resp.success_count,
+        resp.failure_count,
+        len(invalid),
+    )
+    if resp.failure_count:
+        for i, r in enumerate(resp.responses):
+            exc = getattr(r, "exception", None)
+            if exc is not None:
+                logger.warning("FCM token[%d] error: %s", i, exc)
 
     return SendResult(
         success_count=resp.success_count,
