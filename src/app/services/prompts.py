@@ -24,6 +24,7 @@ from app.models.prompt import (
     FirePromptRequest,
     Prompt,
     PromptMediaType,
+    PromptStatus,
     PromptUIState,
     PromptView,
 )
@@ -144,6 +145,7 @@ def _build_view(row: dict, now: datetime) -> PromptView:
     dispatched = _parse_dt(row["dispatched_at"])
     rws = int(group["response_window_seconds"])
     lws = int(group["late_window_seconds"])
+    db_status = row.get("status", "active")
     on_time, late = compute_deadlines(dispatched, rws, lws)
     return PromptView(
         id=UUID(row["id"]),
@@ -153,7 +155,9 @@ def _build_view(row: dict, now: datetime) -> PromptView:
         dispatched_at=dispatched,
         on_time_deadline=on_time,
         late_deadline=late,
-        state=compute_state(now, dispatched, rws, lws),
+        state=PromptUIState.RESPONDED
+        if db_status in (PromptStatus.RESPONDED, PromptStatus.LATE)
+        else compute_state(now, dispatched, rws, lws),
     )
 
 

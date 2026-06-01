@@ -34,6 +34,10 @@ class PromptUIState(StrEnum):
     ACTIVE = "active"
     LATE = "late"
     MISSED = "missed"
+    # DB status='responded' or 'late' (already captured) — returned so the
+    # mobile screen can show a "you've already captured this" state instead of
+    # re-presenting the capture CTA.
+    RESPONDED = "responded"
 
 
 class Prompt(BaseModel):
