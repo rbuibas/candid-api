@@ -229,8 +229,10 @@ def test_get_single_returns_view_for_responded_prompt(
     assert response.status_code == 200
     body = response.json()
     assert body["id"] == row["id"]
-    # State reflects NOW vs dispatched_at, not the DB status.
-    assert body["state"] in {"active", "late", "missed"}
+    # A row already captured (DB status='responded'/'late') reports
+    # state='responded' so the mobile shows "already captured" rather than
+    # re-presenting the capture CTA — regardless of the live time window.
+    assert body["state"] == "responded"
 
 
 def test_get_single_requires_auth(auth_client: TestClient) -> None:

@@ -6,12 +6,12 @@ import json
 import logging
 from typing import Any, NamedTuple
 
-logger = logging.getLogger(__name__)
-
 import firebase_admin
 from firebase_admin import credentials, messaging
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _app: Any = None
 
