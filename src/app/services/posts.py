@@ -18,13 +18,19 @@ the post is_late=true and flips the prompt to status='late'. The
 posts_prompt_id_unique partial index guards against a second confirm
 racing for the same prompt.
 
+Phase 6 extension — both write paths (upload-url, confirm) refuse a locked
+group (today's UTC date > end_date) with GroupLockedError → 409
+{"error": "group_locked"}. The lifecycle decision is delegated to
+groups.compute_lifecycle so "locked" means the same thing everywhere. Feed
+reads are unaffected; only writes are gated.
+
 Service-role bypasses RLS at this layer, so we manually scope every read
 by membership. RLS is still the second line of defence for the rare case
 this layer is reached with a different key.
 """
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
 from postgrest.exceptions import APIError
@@ -40,6 +46,7 @@ from app.models.post import (
     UploadUrlRequest,
     UploadUrlResponse,
 )
+from app.services.groups import compute_lifecycle
 from app.services.prompts import compute_deadlines
 
 log = logging.getLogger(__name__)
@@ -53,6 +60,16 @@ class GroupNotFoundError(Exception):
     """Caller is not a member of the requested group (or group doesn't exist).
 
     Routers map this to 404 — same anti-leak convention used by groups.
+    """
+
+
+class GroupLockedError(Exception):
+    """Target group is locked (today's UTC date > end_date): read-only.
+
+    Per /docs/02-product-design.md §6 a locked group accepts no new captures
+    (prompt or photobooth). Routers map this to 409 with the machine-readable
+    body {"error": "group_locked"}. Feed reads stay allowed — this only gates
+    the write paths (upload-url, confirm).
     """
 
 
@@ -141,6 +158,36 @@ def _select_post(sb: Client, post_id: UUID) -> dict | None:
     return result.data
 
 
+def _load_unlocked_group(sb: Client, group_id: UUID) -> dict:
+    """Fetch the group's lifecycle dates + view_delay, enforcing the lock gate.
+
+    The lifecycle rule lives in one place — ``groups.compute_lifecycle`` — so
+    "locked" here means exactly what it means everywhere else (today's UTC
+    date > end_date). Returns the row so callers can read view_delay_seconds
+    without a second round-trip.
+
+    Raises GroupNotFoundError if the group vanished; GroupLockedError if it is
+    locked.
+    """
+    result = (
+        sb.table("groups")
+        .select("view_delay_seconds, start_date, end_date")
+        .eq("id", str(group_id))
+        .maybe_single()
+        .execute()
+    )
+    if not result or not result.data:
+        raise GroupNotFoundError()
+    row = result.data
+    lifecycle = compute_lifecycle(
+        date.fromisoformat(str(row["start_date"])),
+        date.fromisoformat(str(row["end_date"])),
+    )
+    if lifecycle == "locked":
+        raise GroupLockedError()
+    return row
+
+
 def create_upload_url(
     sb: Client,
     user_id: UUID,
@@ -148,6 +195,9 @@ def create_upload_url(
 ) -> UploadUrlResponse:
     if not _is_member(sb, user_id, payload.group_id):
         raise GroupNotFoundError()
+
+    # A locked group is read-only — refuse to mint an upload URL for it.
+    _load_unlocked_group(sb, payload.group_id)
 
     post_id = uuid4()
     storage_path = _post_storage_path(payload.group_id, post_id, payload.extension)
@@ -211,16 +261,26 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
     if not _is_member(sb, user_id, payload.group_id):
         raise GroupNotFoundError()
 
-    # 3. Storage-path tamper check.
+    # 3. Lifecycle gate. A locked group (today > end_date) is read-only: no new
+    #    captures, prompt or photobooth. Checked before the prompt-window logic
+    #    so a confirm into a locked group always surfaces as group_locked, not
+    #    as a stale-prompt 409. (Idempotent re-calls already returned above — a
+    #    post created while the group was active is never retroactively
+    #    rejected.) The same read carries view_delay_seconds for visible_at
+    #    below, so this costs no extra round-trip.
+    group_row = _load_unlocked_group(sb, payload.group_id)
+    view_delay_seconds = int(group_row["view_delay_seconds"])
+
+    # 4. Storage-path tamper check.
     expected_prefix = _post_storage_path_prefix(payload.group_id, payload.post_id)
     if not payload.storage_path.startswith(expected_prefix):
         raise StoragePathMismatchError()
 
-    # 4. Object must exist at the path.
+    # 5. Object must exist at the path.
     if not r2.head_object(payload.storage_path):
         raise MediaObjectMissingError()
 
-    # 5. Prompt-window enforcement (kind=prompt only). Lateness is computed
+    # 6. Prompt-window enforcement (kind=prompt only). Lateness is computed
     #    from server-receipt time vs. dispatched_at deadlines — never
     #    captured_at, never client clock.
     is_late = False
@@ -238,17 +298,7 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
             raise PromptExpiredError()
         is_late = now > on_time
 
-    # 6. visible_at = now + group.view_delay_seconds.
-    group_row = (
-        sb.table("groups")
-        .select("view_delay_seconds")
-        .eq("id", str(payload.group_id))
-        .maybe_single()
-        .execute()
-    )
-    if not group_row or not group_row.data:
-        raise GroupNotFoundError()
-    view_delay_seconds = int(group_row.data["view_delay_seconds"])
+    # 7. visible_at = now + group.view_delay_seconds (fetched at step 3).
     visible_at = datetime.now(UTC) + timedelta(seconds=view_delay_seconds)
 
     accuracy_int: int | None = None
@@ -272,7 +322,7 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
         "location_accuracy_meters": accuracy_int,
     }
 
-    # 7. Insert. Two possible 23505 (unique_violation) shapes:
+    # 8. Insert. Two possible 23505 (unique_violation) shapes:
     #    a) same post_id raced → idempotent re-fetch
     #    b) different post_id, same prompt_id (posts_prompt_id_unique) →
     #       another confirm beat us; surface as PromptNotActiveError.
@@ -291,7 +341,7 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
     if not insert_result.data:
         raise RuntimeError("posts insert returned no row")
 
-    # 8. Best-effort prompt status flip. The partial unique index on
+    # 9. Best-effort prompt status flip. The partial unique index on
     #    posts.prompt_id guarantees a re-confirm collides on insert, so a
     #    silently-failing flip here only affects what /prompts/active
     #    returns until the next read — not correctness.

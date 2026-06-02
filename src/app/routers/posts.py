@@ -4,6 +4,7 @@ Thin handlers — the work lives in services/posts.py. The error translation
 table:
 
 - GroupNotFoundError        → 404 (caller not in group, or no such group)
+- GroupLockedError          → 409 {"error": "group_locked"} (group past end_date)
 - PostNotFoundError         → 404 (no such post / tombstoned)
 - PostNotAccessibleError    → 403 (post exists, caller not in its group;
                                     or tampered re-confirm)
@@ -20,6 +21,7 @@ table:
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.responses import JSONResponse
 from supabase import Client
 
 from app.auth.jwt import get_current_user_id
@@ -36,12 +38,25 @@ from app.services import posts as posts_service
 router = APIRouter(prefix="/posts", tags=["posts"])
 
 
+def _group_locked_response() -> JSONResponse:
+    """409 with the machine-readable body the client matches on.
+
+    Deliberately {"error": "group_locked"} rather than FastAPI's default
+    {"detail": ...} shape — the mobile app keys its locked-group handling off
+    this exact code.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"error": "group_locked"},
+    )
+
+
 @router.post("/upload-url", response_model=UploadUrlResponse)
 def create_upload_url(
     payload: UploadUrlRequest,
     user_id: UUID = Depends(get_current_user_id),
     sb: Client = Depends(get_supabase),
-) -> UploadUrlResponse:
+) -> UploadUrlResponse | JSONResponse:
     try:
         return posts_service.create_upload_url(sb, user_id, payload)
     except posts_service.GroupNotFoundError as e:
@@ -49,6 +64,8 @@ def create_upload_url(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Group not found",
         ) from e
+    except posts_service.GroupLockedError:
+        return _group_locked_response()
 
 
 @router.post("/confirm", response_model=Post)
@@ -56,7 +73,7 @@ def confirm_post(
     payload: ConfirmPostRequest,
     user_id: UUID = Depends(get_current_user_id),
     sb: Client = Depends(get_supabase),
-) -> Post:
+) -> Post | JSONResponse:
     try:
         return posts_service.confirm(sb, user_id, payload)
     except posts_service.GroupNotFoundError as e:
@@ -64,6 +81,8 @@ def confirm_post(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Group not found",
         ) from e
+    except posts_service.GroupLockedError:
+        return _group_locked_response()
     except posts_service.PostNotAccessibleError as e:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

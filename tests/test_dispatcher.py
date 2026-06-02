@@ -167,7 +167,12 @@ def test_dispatcher_no_due_prompts_returns_zero(stub_send_push: MagicMock) -> No
     router.stub_select("prompts", [])
     sb = _wire(router)
     counts = dispatcher.run_tick(sb, now=datetime(2026, 5, 30, 11, 0, tzinfo=UTC))
-    assert counts == {"prompts_dispatched": 0, "tokens_sent": 0, "devices_pruned": 0}
+    assert counts == {
+        "prompts_dispatched": 0,
+        "tokens_sent": 0,
+        "devices_pruned": 0,
+        "prompts_cancelled_locked": 0,
+    }
     stub_send_push.assert_not_called()
 
 
@@ -307,3 +312,76 @@ def test_dispatcher_caches_group_settings_within_tick(
     # Only ONE select on `groups` despite three prompts in the batch.
     groups_table = router.tables["groups"]
     assert groups_table.select.call_count == 1
+
+
+# --- Phase 6: lock re-check --------------------------------------
+
+
+def test_dispatcher_cancels_prompt_when_group_locked(stub_send_push: MagicMock) -> None:
+    """A prompt scheduled while active but dispatched after the group locks is
+    cancelled to a terminal state (missed), not pushed."""
+    router = TableRouter()
+    user_id = str(uuid4())
+    group_id = str(uuid4())
+    prompt = _prompt(user_id=user_id, group_id=group_id)
+    router.stub_select("prompts", [prompt])
+    # end_date well in the real past → locked (compute_lifecycle uses real now).
+    router.stub_select(
+        "groups",
+        {
+            "response_window_seconds": 300,
+            "late_window_seconds": 1800,
+            "start_date": "2024-01-01",
+            "end_date": "2024-06-01",
+        },
+    )
+    router.stub_select("devices", [{"fcm_token": "tok"}])
+    sb = _wire(router)
+
+    counts = dispatcher.run_tick(sb, now=datetime(2026, 5, 30, 11, 0, tzinfo=UTC))
+
+    assert counts["prompts_cancelled_locked"] == 1
+    assert counts["prompts_dispatched"] == 0
+    # No push for a cancelled prompt.
+    stub_send_push.assert_not_called()
+
+    # Flipped to a terminal status='missed'; no dispatched_at written.
+    prompt_updates = [u for u in router.update_calls if u[0] == "prompts"]
+    assert len(prompt_updates) == 1
+    _table, payload, (col, val) = prompt_updates[0]
+    assert payload == {"status": "missed"}
+    assert (col, val) == ("id", prompt["id"])
+
+
+def test_dispatcher_dispatches_when_group_active_with_dates(
+    stub_send_push: MagicMock,
+) -> None:
+    """Lifecycle dates present but the group is still active → normal dispatch."""
+    router = TableRouter()
+    user_id = str(uuid4())
+    group_id = str(uuid4())
+    prompt = _prompt(user_id=user_id, group_id=group_id)
+    router.stub_select("prompts", [prompt])
+    router.stub_select(
+        "groups",
+        {
+            "response_window_seconds": 300,
+            "late_window_seconds": 1800,
+            "start_date": "2024-01-01",
+            "end_date": "2099-12-31",
+        },
+    )
+    router.stub_select("devices", [{"fcm_token": "tok"}])
+    stub_send_push.return_value = SendResult(1, 0, [])
+    sb = _wire(router)
+
+    counts = dispatcher.run_tick(sb, now=datetime(2026, 5, 30, 11, 0, tzinfo=UTC))
+
+    assert counts["prompts_cancelled_locked"] == 0
+    assert counts["prompts_dispatched"] == 1
+    # Active-flip happened (status='active', dispatched_at set), not a cancel.
+    prompt_updates = [u for u in router.update_calls if u[0] == "prompts"]
+    assert len(prompt_updates) == 1
+    _table, payload, _eq = prompt_updates[0]
+    assert payload["status"] == "active"
+    assert "dispatched_at" in payload
