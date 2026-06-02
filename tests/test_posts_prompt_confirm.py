@@ -122,9 +122,10 @@ def _wire_prompt_confirm_chains(
 
     Two distinct chains share leaves on the MagicMock — both use the
     single-eq + maybe_single shape:
-      1. _load_active_prompt: prompts-by-id (joined with groups)
-      2. group_row: groups-by-id for view_delay_seconds
-    These are sequenced via `side_effect` in call order.
+      1. group_row: groups-by-id for the lifecycle gate + view_delay_seconds
+      2. _load_active_prompt: prompts-by-id (joined with groups)
+    These are sequenced via `side_effect` in call order — the lifecycle gate
+    (step 3 of confirm) now runs before the prompt-window check (step 6).
 
     Returns the prompt-update leaf so tests can inspect the new status arg.
     """
@@ -140,14 +141,20 @@ def _wire_prompt_confirm_chains(
     fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = member_resp  # noqa: E501
 
     # Shared single-eq + maybe_single leaf, sequenced:
-    #   1st call → prompt lookup
-    #   2nd call → group view_delay lookup
+    #   1st call → group lifecycle + view_delay lookup
+    #   2nd call → prompt lookup
+    # Far-past start / far-future end keep the group active regardless of when
+    # the suite runs.
+    group_resp = MagicMock()
+    group_resp.data = {
+        "view_delay_seconds": view_delay_seconds,
+        "start_date": "2024-01-01",
+        "end_date": "2099-12-31",
+    }
     prompt_resp = MagicMock()
     prompt_resp.data = prompt_row
-    group_resp = MagicMock()
-    group_resp.data = {"view_delay_seconds": view_delay_seconds}
     shared = fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute  # noqa: E501
-    shared.side_effect = [prompt_resp, group_resp]
+    shared.side_effect = [group_resp, prompt_resp]
 
     # Insert leaf.
     insert_resp = MagicMock()

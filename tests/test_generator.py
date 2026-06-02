@@ -234,6 +234,28 @@ def test_generator_skips_outside_group_date_range() -> None:
     assert counts["prompts_inserted"] == 0
 
 
+def test_generator_excludes_locked_group_past_end_date() -> None:
+    """Phase 6 verification: a locked group (end_date well before now) yields
+    no prompts. The generator already excludes non-active groups from Phase 4 —
+    the per-member local_date guard enforces it even if the SELECT filter is
+    bypassed (as the chain stub does here)."""
+    router = TableRouter()
+    # Event ended long before `now` → locked.
+    group = _group_row(start_date="2026-04-01", end_date="2026-04-15")
+    user_id = str(uuid4())
+
+    router.stub_select_chain("groups", [group])
+    router.stub_select_chain(
+        "group_members", [{"user_id": user_id, "profiles": {"timezone": "UTC"}}]
+    )
+    router.stub_select_chain("prompts", [])
+    sb = _wire(router)
+
+    counts = generator.run_tick(sb, now=datetime(2026, 5, 30, 10, 0, tzinfo=UTC))
+    assert counts["prompts_inserted"] == 0
+    assert router.insert_calls["prompts"] == []
+
+
 def test_generator_uses_member_timezone() -> None:
     router = TableRouter()
     group = _group_row(

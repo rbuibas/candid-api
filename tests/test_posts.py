@@ -127,17 +127,16 @@ def test_upload_url_happy_path(
     user_id = uuid4()
     group_id = uuid4()
 
-    # Both .maybe_single() chains in this request walk the same leaf:
-    # profile load + membership pre-check. Return profile row first,
-    # then a truthy membership row.
-    leaf = fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute  # noqa: E501
-    profile_call = MagicMock()
-    profile_call.data = _profile_row(user_id)
-    leaf.return_value = profile_call
-
+    # Two .maybe_single() chains: the two-eq membership pre-check, and the
+    # one-eq group lifecycle fetch (_load_unlocked_group). Wire both — the
+    # group must be active so upload-url proceeds.
     member_call = MagicMock()
     member_call.data = {"id": "membership-row-id"}
     fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = member_call  # noqa: E501
+
+    group_call = MagicMock()
+    group_call.data = _unlocked_group_data()
+    fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = group_call  # noqa: E501
 
     response = auth_client.post(
         "/posts/upload-url",
@@ -173,6 +172,10 @@ def test_upload_url_uses_mp4_for_video(fake_sb: MagicMock, _stub_r2: dict[str, M
     fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value.data = {  # noqa: E501
         "id": "membership-row-id"
     }
+    # Group lifecycle fetch (one-eq + maybe_single) — active group.
+    group_call = MagicMock()
+    group_call.data = _unlocked_group_data()
+    fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = group_call  # noqa: E501
 
     posts_service.create_upload_url(
         fake_sb,
@@ -231,6 +234,19 @@ def _confirm_payload(post_id: UUID, group_id: UUID, **overrides: Any) -> Confirm
     return ConfirmPostRequest(**base)
 
 
+def _unlocked_group_data(view_delay_seconds: int = 30, *, locked: bool = False) -> dict[str, Any]:
+    """The groups row _load_unlocked_group() reads: view_delay + lifecycle dates.
+
+    Far-past start and far-future end keep the group `active` regardless of
+    when the suite runs; `locked=True` pushes end_date into the real past.
+    """
+    return {
+        "view_delay_seconds": view_delay_seconds,
+        "start_date": "2024-01-01",
+        "end_date": "2024-06-01" if locked else "2099-12-31",
+    }
+
+
 def _wire_confirm_chains(
     fake_sb: MagicMock,
     *,
@@ -238,12 +254,13 @@ def _wire_confirm_chains(
     is_member: bool,
     view_delay_seconds: int = 30,
     inserted_row: dict | None = None,
+    locked: bool = False,
 ) -> None:
     """Configure the four supabase chains confirm() walks.
 
     1. posts select by id (idempotency): .table().select().eq().is_().maybe_single().execute()
     2. membership pre-check: .table().select().eq().eq().maybe_single().execute()
-    3. groups view_delay select: .table().select().eq().maybe_single().execute()
+    3. groups lifecycle+view_delay select: .table().select().eq().maybe_single().execute()
     4. posts insert: .table().insert().execute()
 
     All chains share leaves on the MagicMock, so we set side_effect lists.
@@ -259,9 +276,9 @@ def _wire_confirm_chains(
     member_resp.data = {"id": "membership-row-id"} if is_member else None
     fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = member_resp  # noqa: E501
 
-    # Group view_delay_seconds leaf — one-eq + maybe_single.
+    # Group lifecycle + view_delay_seconds leaf — one-eq + maybe_single.
     group_resp = MagicMock()
-    group_resp.data = {"view_delay_seconds": view_delay_seconds}
+    group_resp.data = _unlocked_group_data(view_delay_seconds, locked=locked)
     fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = group_resp  # noqa: E501
 
     # Insert leaf.
@@ -421,6 +438,167 @@ def test_confirm_unique_violation_falls_back_to_existing(
     payload = _confirm_payload(post_id, group_id)
     result = posts_service.confirm(fake_sb, user_id, payload)
     assert result.id == post_id
+
+
+# --- Phase 6: locked-group write gate --------------------------------
+
+
+def test_upload_url_locked_group_returns_409_group_locked(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+
+    # Membership passes; the group lifecycle fetch reports locked.
+    member_call = MagicMock()
+    member_call.data = {"id": "membership-row-id"}
+    fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = member_call  # noqa: E501
+
+    group_call = MagicMock()
+    group_call.data = _unlocked_group_data(locked=True)
+    fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = group_call  # noqa: E501
+
+    response = auth_client.post(
+        "/posts/upload-url",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={
+            "group_id": str(group_id),
+            "kind": "photobooth",
+            "media_type": "strip",
+            "extension": "jpg",
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert response.json() == {"error": "group_locked"}
+    # No presigned URL minted for a locked group.
+    _stub_r2["put"].assert_not_called()
+
+
+def test_upload_url_locked_group_service_raises(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+
+    member_call = MagicMock()
+    member_call.data = {"id": "membership-row-id"}
+    fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value = member_call  # noqa: E501
+    group_call = MagicMock()
+    group_call.data = _unlocked_group_data(locked=True)
+    fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = group_call  # noqa: E501
+
+    with pytest.raises(posts_service.GroupLockedError):
+        posts_service.create_upload_url(
+            fake_sb,
+            user_id,
+            UploadUrlRequest(
+                group_id=group_id,
+                kind=PostKind.PHOTOBOOTH,
+                media_type=PostMediaType.STRIP,
+                extension="jpg",
+            ),
+        )
+    _stub_r2["put"].assert_not_called()
+
+
+def test_confirm_locked_group_returns_409_group_locked(
+    auth_client: TestClient,
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    _wire_confirm_chains(fake_sb, existing_post=None, is_member=True, locked=True)
+
+    response = auth_client.post(
+        "/posts/confirm",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={
+            "post_id": str(post_id),
+            "group_id": str(group_id),
+            "kind": "photobooth",
+            "media_type": "strip",
+            "storage_path": f"groups/{group_id}/posts/{post_id}/media.jpg",
+            "captured_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert response.json() == {"error": "group_locked"}
+    # Lock gate precedes the R2 head + insert.
+    _stub_r2["head"].assert_not_called()
+    fake_sb.table.return_value.insert.assert_not_called()
+
+
+def test_confirm_locked_group_photobooth_service_raises(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    _wire_confirm_chains(fake_sb, existing_post=None, is_member=True, locked=True)
+
+    payload = _confirm_payload(post_id, group_id)
+    with pytest.raises(posts_service.GroupLockedError):
+        posts_service.confirm(fake_sb, user_id, payload)
+
+    _stub_r2["head"].assert_not_called()
+    fake_sb.table.return_value.insert.assert_not_called()
+
+
+def test_confirm_locked_group_prompt_kind_raises_before_prompt_check(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    """For kind=prompt the lock gate (step 3) precedes prompt-window
+    enforcement (step 6), so a locked group surfaces as GroupLockedError, not
+    a stale-prompt 409. The prompt lookup is never reached."""
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    _wire_confirm_chains(fake_sb, existing_post=None, is_member=True, locked=True)
+
+    payload = _confirm_payload(
+        post_id,
+        group_id,
+        kind=PostKind.PROMPT,
+        media_type=PostMediaType.PHOTO,
+        prompt_id=uuid4(),
+    )
+    with pytest.raises(posts_service.GroupLockedError):
+        posts_service.confirm(fake_sb, user_id, payload)
+
+    _stub_r2["head"].assert_not_called()
+    fake_sb.table.return_value.insert.assert_not_called()
+
+
+def test_confirm_active_group_inserts(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    """Counterpart to the locked case: an active group confirms normally."""
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    _wire_confirm_chains(
+        fake_sb,
+        existing_post=None,
+        is_member=True,
+        locked=False,
+        inserted_row=_post_row(post_id, user_id, group_id),
+    )
+
+    result = posts_service.confirm(fake_sb, user_id, _confirm_payload(post_id, group_id))
+    assert result.id == post_id
+    fake_sb.table.return_value.insert.assert_called_once()
 
 
 # --- GET /posts/{id} -------------------------------------------------
