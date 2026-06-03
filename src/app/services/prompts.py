@@ -27,6 +27,7 @@ from app.models.prompt import (
     PromptStatus,
     PromptUIState,
     PromptView,
+    TriggerPromptRequest,
 )
 
 
@@ -310,3 +311,84 @@ def fire_prompt_now(
             sb.table("devices").delete().in_("fcm_token", result.invalid_tokens).execute()
 
     return Prompt.model_validate(saved)
+
+
+def trigger_prompt_for_user(
+    sb: Client,
+    user_id: UUID,
+    payload: TriggerPromptRequest,
+    *,
+    rng: random.Random | None = None,
+) -> PromptView:
+    """Create + immediately dispatch a prompt for the caller, returning PromptView.
+
+    The impl behind POST /dev/prompts/trigger. Like fire_prompt_now it writes a
+    status='active' row with dispatched_at=now so the deadlines anchor on server
+    time, but it differs in two ways: it sends NO FCM push (the app navigates to
+    capture straight off this HTTP response — it's a direct trigger, not a real
+    dispatch), and it returns the PromptView read shape (computed deadlines + UI
+    state) so the caller gets the same contract as /prompts/{id}.
+
+    There is no `dispatched` prompt status in the DB enum; 'active' is the
+    dispatched-and-actionable state. on_time/late deadlines are computed from the
+    group windows, not stored.
+    """
+    rng = rng or random.Random()
+
+    if not _is_member(sb, user_id, payload.group_id):
+        raise GroupNotFoundError()
+
+    group = (
+        sb.table("groups")
+        .select("max_video_length_seconds, response_window_seconds, late_window_seconds")
+        .eq("id", str(payload.group_id))
+        .maybe_single()
+        .execute()
+    )
+    if not group or not group.data:
+        raise GroupNotFoundError()
+    g = group.data
+    rws = int(g["response_window_seconds"])
+    lws = int(g["late_window_seconds"])
+
+    profile = (
+        sb.table("profiles").select("timezone").eq("id", str(user_id)).maybe_single().execute()
+    )
+    tz = (profile.data or {}).get("timezone", "UTC") if profile else "UTC"
+    now = datetime.now(UTC)
+    local_today = now.astimezone(ZoneInfo(tz)).date()
+
+    media_type = payload.media_type
+    target_video: int | None = None
+    if media_type is PromptMediaType.VIDEO:
+        max_video = int(g["max_video_length_seconds"])
+        target_video = rng.randint(3, max_video) if max_video >= 3 else max_video
+
+    row = {
+        "id": str(uuid4()),
+        "group_id": str(payload.group_id),
+        "user_id": str(user_id),
+        "scheduled_at": now.isoformat(),
+        "dispatched_at": now.isoformat(),
+        "local_date": local_today.isoformat(),
+        "media_type": media_type.value,
+        "target_video_length_seconds": target_video,
+        "status": "active",
+    }
+    inserted = sb.table("prompts").insert(row).execute()
+    if not inserted.data:
+        raise RuntimeError("prompts insert returned no row")
+    saved = inserted.data[0]
+
+    dispatched = _parse_dt(saved["dispatched_at"])
+    on_time, late = compute_deadlines(dispatched, rws, lws)
+    return PromptView(
+        id=UUID(saved["id"]),
+        group_id=UUID(saved["group_id"]),
+        media_type=PromptMediaType(saved["media_type"]),
+        target_video_length_seconds=saved.get("target_video_length_seconds"),
+        dispatched_at=dispatched,
+        on_time_deadline=on_time,
+        late_deadline=late,
+        state=compute_state(now, dispatched, rws, lws),
+    )

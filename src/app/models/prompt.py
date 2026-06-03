@@ -67,3 +67,10 @@ class PromptView(BaseModel):
 class FirePromptRequest(BaseModel):
     group_id: UUID
     media_type: PromptMediaType | None = None
+
+
+class TriggerPromptRequest(BaseModel):
+    """Body for POST /dev/prompts/trigger — media_type is required here."""
+
+    group_id: UUID
+    media_type: PromptMediaType
