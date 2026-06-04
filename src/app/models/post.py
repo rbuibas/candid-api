@@ -41,6 +41,12 @@ class UploadUrlResponse(BaseModel):
     upload_url: str
     storage_path: str
     expires_at: datetime
+    # Video only: a second presigned PUT slot for the client-generated poster
+    # frame (a JPEG). Null for photo/strip. The client uploads the thumbnail
+    # here best-effort; confirm detects it by its canonical key, so a missing
+    # poster never blocks the post.
+    thumbnail_upload_url: str | None = None
+    thumbnail_storage_path: str | None = None
 
 
 class ConfirmPostRequest(BaseModel):
