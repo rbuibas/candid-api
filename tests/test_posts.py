@@ -177,7 +177,7 @@ def test_upload_url_uses_mp4_for_video(fake_sb: MagicMock, _stub_r2: dict[str, M
     group_call.data = _unlocked_group_data()
     fake_sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = group_call  # noqa: E501
 
-    posts_service.create_upload_url(
+    response = posts_service.create_upload_url(
         fake_sb,
         user_id,
         UploadUrlRequest(
@@ -187,7 +187,15 @@ def test_upload_url_uses_mp4_for_video(fake_sb: MagicMock, _stub_r2: dict[str, M
             extension="mp4",
         ),
     )
-    assert _stub_r2["put"].call_args.args[1] == "video/mp4"
+    # Video mints two PUT slots: the mp4 media first, then a JPEG poster frame.
+    calls = _stub_r2["put"].call_args_list
+    assert len(calls) == 2
+    assert calls[0].args[1] == "video/mp4"
+    assert calls[1].args[1] == "image/jpeg"
+    assert calls[1].args[0].endswith("/thumbnail.jpg")
+    assert response.thumbnail_storage_path is not None
+    assert response.thumbnail_storage_path.endswith("/thumbnail.jpg")
+    assert response.thumbnail_upload_url is not None
 
 
 def test_upload_url_non_member_returns_404(
@@ -321,7 +329,74 @@ def test_confirm_happy_path_inserts_with_visible_at(
     delta = (visible_at - datetime.now(UTC)).total_seconds()
     assert 25 < delta < 35  # ≈ now + 30s
 
+    # A strip is its own poster — no thumbnail probe, no thumbnail_path.
+    assert insert_payload["thumbnail_path"] is None
     _stub_r2["head"].assert_called_once_with(payload.storage_path)
+
+
+def test_confirm_video_attaches_poster_when_present(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    """A video confirm probes the canonical thumbnail key and attaches it.
+
+    The poster probe keys off media_type, not kind, so a photobooth video
+    exercises the branch without the prompt-window wiring a kind=prompt confirm
+    would need.
+    """
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    _wire_confirm_chains(
+        fake_sb,
+        existing_post=None,
+        is_member=True,
+        inserted_row=_post_row(post_id, user_id, group_id),
+    )
+
+    payload = _confirm_payload(
+        post_id,
+        group_id,
+        media_type=PostMediaType.VIDEO,
+        storage_path=f"groups/{group_id}/posts/{post_id}/media.mp4",
+    )
+    posts_service.confirm(fake_sb, user_id, payload)
+
+    insert_payload = fake_sb.table.return_value.insert.call_args.args[0]
+    assert insert_payload["thumbnail_path"] == f"groups/{group_id}/posts/{post_id}/thumbnail.jpg"
+    # Two HEADs: the media object, then the poster.
+    assert _stub_r2["head"].call_count == 2
+
+
+def test_confirm_video_no_poster_when_missing(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    """A missing poster never blocks the post — thumbnail_path stays None."""
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    _wire_confirm_chains(
+        fake_sb,
+        existing_post=None,
+        is_member=True,
+        inserted_row=_post_row(post_id, user_id, group_id),
+    )
+    # Media exists, poster doesn't.
+    _stub_r2["head"].side_effect = lambda path: not path.endswith("thumbnail.jpg")
+
+    payload = _confirm_payload(
+        post_id,
+        group_id,
+        media_type=PostMediaType.VIDEO,
+        storage_path=f"groups/{group_id}/posts/{post_id}/media.mp4",
+    )
+    posts_service.confirm(fake_sb, user_id, payload)
+
+    insert_payload = fake_sb.table.return_value.insert.call_args.args[0]
+    assert insert_payload["thumbnail_path"] is None
 
 
 def test_confirm_is_idempotent_on_same_user(

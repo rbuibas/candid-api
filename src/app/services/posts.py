@@ -126,6 +126,12 @@ def _post_storage_path_prefix(group_id: UUID, post_id: UUID) -> str:
     return f"groups/{group_id}/posts/{post_id}/media."
 
 
+def _post_thumbnail_path(group_id: UUID, post_id: UUID) -> str:
+    # Canonical poster key for a video post. Fixed shape (always JPEG) so confirm
+    # can recompute it and probe for the object without trusting any client input.
+    return f"groups/{group_id}/posts/{post_id}/thumbnail.jpg"
+
+
 def _content_type_for(media_type: PostMediaType) -> str:
     # Strip is a client-composed JPEG; photo is also JPEG. Video is mp4
     # (vision-camera default container on both platforms).
@@ -206,12 +212,27 @@ def create_upload_url(
         _content_type_for(payload.media_type),
         ttl_seconds=_UPLOAD_TTL_SECONDS,
     )
+
+    # Video posts get a second PUT slot for a client-generated poster frame.
+    # Photo/strip already are their own poster, so they get none.
+    thumbnail_storage_path: str | None = None
+    thumbnail_upload_url: str | None = None
+    if payload.media_type is PostMediaType.VIDEO:
+        thumbnail_storage_path = _post_thumbnail_path(payload.group_id, post_id)
+        thumbnail_upload_url = r2.generate_presigned_put_url(
+            thumbnail_storage_path,
+            "image/jpeg",
+            ttl_seconds=_UPLOAD_TTL_SECONDS,
+        )
+
     expires_at = datetime.now(UTC) + timedelta(seconds=_UPLOAD_TTL_SECONDS)
     return UploadUrlResponse(
         post_id=post_id,
         upload_url=upload_url,
         storage_path=storage_path,
         expires_at=expires_at,
+        thumbnail_upload_url=thumbnail_upload_url,
+        thumbnail_storage_path=thumbnail_storage_path,
     )
 
 
@@ -280,6 +301,16 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
     if not r2.head_object(payload.storage_path):
         raise MediaObjectMissingError()
 
+    # 5b. Poster detection (video only). The client uploads the frame to the
+    #     canonical thumbnail key best-effort; we recompute that key and probe
+    #     for it rather than trusting any client-supplied path. A missing poster
+    #     is fine — the post still lands with thumbnail_path=None.
+    thumbnail_path: str | None = None
+    if payload.media_type is PostMediaType.VIDEO:
+        candidate = _post_thumbnail_path(payload.group_id, payload.post_id)
+        if r2.head_object(candidate):
+            thumbnail_path = candidate
+
     # 6. Prompt-window enforcement (kind=prompt only). Lateness is computed
     #    from server-receipt time vs. dispatched_at deadlines — never
     #    captured_at, never client clock.
@@ -313,6 +344,7 @@ def confirm(sb: Client, user_id: UUID, payload: ConfirmPostRequest) -> Post:
         "kind": payload.kind.value,
         "media_type": payload.media_type.value,
         "storage_path": payload.storage_path,
+        "thumbnail_path": thumbnail_path,
         "duration_seconds": payload.duration_seconds,
         "captured_at": payload.captured_at.isoformat(),
         "is_late": is_late,
