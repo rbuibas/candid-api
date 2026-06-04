@@ -6,6 +6,13 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Default media-retention window, in days, measured from a group's end_date.
+# Surfaced to the client as `retention_purge_at` on the group response so the
+# app can show a pre-expiry "save your media" nudge. NOTE: this is the *nudge*
+# constant only — there is no purge job yet (see /docs/05 "Media retention +
+# purge"). Don't wire a purger or delete anything in R2 off the back of this.
+RETENTION_DAYS = 60
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

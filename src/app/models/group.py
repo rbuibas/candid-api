@@ -1,8 +1,10 @@
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
+
+from app.config import RETENTION_DAYS
 
 Lifecycle = Literal["upcoming", "active", "locked"]
 
@@ -51,6 +53,19 @@ class Group(BaseModel):
 
 class GroupWithLifecycle(Group):
     lifecycle: Lifecycle
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def retention_purge_at(self) -> datetime:
+        """When this group's media becomes eligible for purge: end_date +
+        RETENTION_DAYS, at UTC midnight. Computed on read (no DB column) and
+        used purely client-side to drive the pre-expiry save nudge. As a
+        computed field it rides along on every construction path
+        (groups + members services) without per-call wiring.
+        """
+        return datetime.combine(
+            self.end_date + timedelta(days=RETENTION_DAYS), time.min, tzinfo=UTC
+        )
 
 
 class GroupCreateResponse(BaseModel):

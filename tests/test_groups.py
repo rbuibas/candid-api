@@ -133,6 +133,26 @@ def test_lifecycle_locked_day_after_end() -> None:
     )
 
 
+# --- retention_purge_at ----------------------------------------------
+
+
+def test_retention_purge_at_is_end_date_plus_60_days() -> None:
+    from app.config import RETENTION_DAYS
+    from app.models.group import Group, GroupWithLifecycle
+
+    assert RETENTION_DAYS == 60
+    group_id = uuid4()
+    creator = uuid4()
+    g = GroupWithLifecycle(
+        **Group.model_validate(_group_row(group_id, creator, end_date="2026-06-03")).model_dump(),
+        lifecycle="locked",
+    )
+    purge = g.retention_purge_at
+    assert purge == datetime(2026, 8, 2, 0, 0, tzinfo=UTC)  # 2026-06-03 + 60 days
+    # Serializes into the response body so the client can compute the nudge.
+    assert g.model_dump(mode="json")["retention_purge_at"] == "2026-08-02T00:00:00Z"
+
+
 # --- invite code generator -------------------------------------------
 
 
