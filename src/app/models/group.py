@@ -22,6 +22,7 @@ class GroupSettings(BaseModel):
     response_window_seconds: int = Field(default=300, gt=0)
     late_window_seconds: int = Field(default=1800, ge=0)
     max_video_length_seconds: int = Field(default=10, gt=0)
+    view_delay_seconds: int = Field(default=0, ge=0)
 
 
 class GroupCreate(BaseModel):

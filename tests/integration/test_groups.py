@@ -168,8 +168,10 @@ def test_non_member_cannot_read_group(
     members = app_client.get(
         f"/groups/{group_id}/members", headers=_auth(outsider, integration_env)
     )
+    feed = app_client.get(f"/groups/{group_id}/feed", headers=_auth(outsider, integration_env))
     assert detail.status_code == 404
     assert members.status_code == 404
+    assert feed.status_code == 404  # scenario 12: non-member cannot read feed
 
 
 def test_members_list_includes_creator_and_joiner(

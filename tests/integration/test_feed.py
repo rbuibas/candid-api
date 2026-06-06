@@ -19,6 +19,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -27,7 +28,7 @@ import httpx
 import jwt
 import pytest
 from fastapi.testclient import TestClient
-from supabase import create_client
+from supabase import Client, create_client
 
 from app.clients import r2
 from app.clients.supabase import get_supabase
@@ -180,6 +181,7 @@ def test_feed_lists_post_then_delete_removes_it_everywhere(
     make_user: Callable[..., UUID],
     integration_env: dict[str, str],
     created_paths: list[str],
+    service_sb: Client,
 ) -> None:
     user = make_user()
     group_id = _create_group(app_client, user, integration_env)
@@ -216,6 +218,10 @@ def test_feed_lists_post_then_delete_removes_it_everywhere(
     # 4. GET /posts/{id} on a tombstoned post → 404.
     get_after = app_client.get(f"/posts/{post_id}", headers=_auth(user, integration_env))
     assert get_after.status_code == 404, get_after.text
+
+    # 4b. posts row has deleted_at set (scenario 9 of the Phase 5 test plan).
+    row = service_sb.table("posts").select("deleted_at").eq("id", post_id).single().execute()
+    assert row.data["deleted_at"] is not None
 
     # 5. R2 object is hard-deleted.
     assert r2.head_object(storage_path) is False
@@ -258,3 +264,49 @@ def test_feed_paginates_across_pages_without_duplicates(
     assert cursor is None  # walk terminated
     assert created_ids.issubset(set(seen))  # every post surfaced
     assert len(seen) == len(set(seen))  # no duplicates across pages
+
+
+def test_view_delay_hides_post_until_visible_at(
+    app_client: TestClient,
+    make_user: Callable[..., UUID],
+    integration_env: dict[str, str],
+    created_paths: list[str],
+) -> None:
+    """Scenario 14: a post is invisible until view_delay_seconds elapses.
+
+    Uses a 5-second delay (instead of the 60s in the manual test plan) so the
+    test completes quickly. The key invariant under test is that confirm sets
+    visible_at = now + view_delay_seconds and the feed filters lte(visible_at).
+    """
+    _DELAY = 5
+
+    user = make_user()
+
+    group_resp = app_client.post(
+        "/groups",
+        headers=_auth(user, integration_env),
+        json={
+            "name": "ViewDelayE2E",
+            "start_date": _today_iso(),
+            "end_date": _iso(2),
+            "settings": {"view_delay_seconds": _DELAY},
+        },
+    )
+    assert group_resp.status_code == 201, group_resp.text
+    group_id = group_resp.json()["group"]["id"]
+
+    post_id, storage_path = _upload_confirm(app_client, user, group_id, integration_env)
+    created_paths.append(storage_path)
+
+    # Immediately after confirm the post must NOT appear (visible_at is in the future).
+    feed_before = app_client.get(f"/groups/{group_id}/feed", headers=_auth(user, integration_env))
+    assert feed_before.status_code == 200, feed_before.text
+    assert post_id not in [item["id"] for item in feed_before.json()["items"]]
+
+    # Wait for view_delay to elapse (with a small buffer).
+    time.sleep(_DELAY + 2)
+
+    # Now the post must be visible.
+    feed_after = app_client.get(f"/groups/{group_id}/feed", headers=_auth(user, integration_env))
+    assert feed_after.status_code == 200, feed_after.text
+    assert post_id in [item["id"] for item in feed_after.json()["items"]]

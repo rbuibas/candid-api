@@ -676,6 +676,37 @@ def test_confirm_active_group_inserts(
     fake_sb.table.return_value.insert.assert_called_once()
 
 
+# --- Phase 6: offline captured_at preserved ---------------------------
+
+
+def test_confirm_stores_client_captured_at_not_server_time(
+    fake_sb: MagicMock,
+    _stub_r2: dict[str, MagicMock],
+) -> None:
+    """captured_at in the DB insert is the client-supplied value, not the
+    server-receipt time — so a photo taken offline 45 min before reconnect
+    still carries the original capture moment."""
+    user_id = uuid4()
+    group_id = uuid4()
+    post_id = uuid4()
+
+    offline_captured_at = datetime.now(UTC) - timedelta(minutes=45)
+
+    _wire_confirm_chains(
+        fake_sb,
+        existing_post=None,
+        is_member=True,
+        inserted_row=_post_row(post_id, user_id, group_id),
+    )
+
+    posts_service.confirm(fake_sb, user_id, _confirm_payload(post_id, group_id, captured_at=offline_captured_at))
+
+    insert_payload = fake_sb.table.return_value.insert.call_args.args[0]
+    stored = datetime.fromisoformat(insert_payload["captured_at"])
+    # Must match client-provided time, not server now (~45 min later).
+    assert abs((stored - offline_captured_at).total_seconds()) < 1
+
+
 # --- GET /posts/{id} -------------------------------------------------
 
 
