@@ -5,16 +5,21 @@ Repo-root guidance for Claude Code. Place a copy at the root of **each** repo (`
 ## Project context
 **Candid** (working codename) — a private, invite-only app that captures candid group moments during an event. Each member is prompted at their own random times to take a photo or short video; everything lands in a shared, event-scoped feed. We're building the **MVP for a single bachelor party**, distributed via TestFlight + APK, not the public. Read `/docs/02-product-design.md` for behavior and `/docs/04-build-phases.md` for what's in scope right now. Don't build ahead of the current phase.
 
+**DIRECTION (current):** Candid is an event-scoped, BeReal-inspired group camera app that embraces social engagement (reactions, comments) and the prompt pressure mechanic. Differentiator = event-scoping + an end-of-event reel built from "originals" (prompted captures). Authoritative spec: candid-requirements and candid-phases. The original /docs set and all keepsake-first material are superseded background only.
+
 ## Non-negotiables — these are bugs, not tradeoffs
 If you find yourself doing any of these "for convenience," stop — it's a defect, not a shortcut:
-1. **Added a gallery/library picker.** Capture is live-only. Bug.
-2. **Added likes/comments/reactions/counts or any public/global surface.** Bug.
-3. **Synchronized prompts across users**, or generated them non-independently. Bug.
-4. **Used `scheduled_at` or client open-time as the response-window anchor**, or trusted client `captured_at` to decide on-time/late/missed. The server and `dispatched_at` own that. Bug.
-5. **Let a missing/denied notification permission fail silently.** Must be detected and surfaced. Bug.
-6. **Required location** or blocked a capture on a missing fix. It's optional. Bug.
-7. **Put any user data or media outside an EU region**, or shipped a secret (service-role key, R2 secret, Firebase admin creds) into the mobile bundle. Bug.
-8. **Pulled a feature out of `/docs/05-future-features.md` into the build** without an explicit instruction. Bug.
+1. **Added a gallery/library picker, or allowed non-live capture for EITHER originals OR voluntary posts.** Capture is live-only in both modes. Bug.
+2. **Blurred ORIGINALS and VOLUNTARY posts.** Prompted captures are originals (color, reel-eligible); voluntary captures are forced B&W, daily-capped, behind an admin toggle, and never reel-eligible (MVP). Conflating them is a bug.
+3. **Let a member bypass a live unanswered prompt to reach the feed/social surfaces.** The prompt gate must hold until the prompt is answered or its window expires (a missed prompt does NOT re-lock). Basic account/settings must stay reachable. Bug to bypass.
+4. **Exceeded the bounded social surface:** reactions must be a FIXED small emoji set (not the full keyboard); comments are text-only; there is NO group chat; there are NO cross-user leaderboards or rankings (MVP). Per-photo reaction counts and reactor identity ARE allowed. Bug to exceed.
+5. **Synchronized prompts across users**, or generated them non-independently. Bug.
+6. **Used `scheduled_at` or client open-time as the response-window anchor**, or trusted client `captured_at` to decide on-time/late/missed. The server and `dispatched_at` own that. Bug.
+7. **Let a missing/denied notification permission fail silently.** Must be detected and surfaced. Bug.
+8. **Required location** or blocked a capture on a missing fix. It's optional. Bug.
+9. **Put any user data or media outside an EU region**, or shipped a secret (service-role key, R2 secret, Firebase admin creds) into the mobile bundle. Bug.
+10. **Pulled a voluntary (B&W) post into the reel, or built the reel from anything other than originals (MVP).** The reel is originals-only for now. Bug.
+11. **Built ahead of the current phase, or pulled a post-MVP item** (separate-lane layout, voluntary-in-reel, leaderboards, comment moderation, group chat, reusable groups, retention, public-readiness, map, reverse geocoding, export) into the build without an explicit instruction. See candid-phases. Bug.
 
 ## Repo structure
 Split repos. See `/docs/03-technical-architecture.md` §7 for the full module layout.
@@ -58,7 +63,7 @@ Python 3.12 + FastAPI + uv · Supabase (Postgres, magic-link auth, RLS) · Cloud
 
 ## Never do
 - Don't add infra/services beyond the stack above without flagging it first.
-- Don't widen scope past the current phase or reach into `/docs/05`.
+- Don't widen scope past the current phase or pull in a post-MVP item (see candid-phases' post-MVP backlog). If a request implies one, name it and confirm before expanding.
 - Don't weaken any non-negotiable above for convenience or speed.
 - Don't commit secrets; don't put data/media outside the EU region.
 - Don't ship a competitor's trademark in identifiers (replace any leftover `bereal-trips` with `candid`).
