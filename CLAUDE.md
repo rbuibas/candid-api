@@ -10,8 +10,8 @@ Repo-root guidance for Claude Code. Place a copy at the root of **each** repo (`
 ## Non-negotiables — these are bugs, not tradeoffs
 If you find yourself doing any of these "for convenience," stop — it's a defect, not a shortcut:
 1. **Added a gallery/library picker, or allowed non-live capture for EITHER originals OR voluntary posts.** Capture is live-only in both modes. Bug.
-2. **Blurred ORIGINALS and VOLUNTARY posts.** Prompted captures are originals (color, reel-eligible); voluntary captures are forced B&W, daily-capped, behind an admin toggle, and never reel-eligible (MVP). Conflating them is a bug.
-3. **Let a member bypass a live unanswered prompt to reach the feed/social surfaces.** The prompt gate must hold until the prompt is answered or its window expires (a missed prompt does NOT re-lock). Basic account/settings must stay reachable. Bug to bypass.
+2. **Blurred ORIGINALS and VOLUNTARY posts.** Prompted captures are originals (color, reel-eligible); voluntary captures are photo-only, forced B&W (baked into the asset at capture), daily-capped, behind an admin toggle, and never reel-eligible (MVP). Conflating them is a bug.
+3. **Let a member bypass a live unanswered prompt to reach the feed/social surfaces.** The prompt gate must hold until the prompt is answered or its RESPONSE window expires (the late window is un-gated; an on-device capture confirmed-and-queued counts as answered; a missed prompt does NOT re-lock). A reduced settings surface (notification recovery, sign-out) must stay reachable. Bug to bypass.
 4. **Exceeded the bounded social surface:** reactions must be a FIXED small emoji set (not the full keyboard); comments are text-only; there is NO group chat; there are NO cross-user leaderboards or rankings (MVP). Per-photo reaction counts and reactor identity ARE allowed. Bug to exceed.
 5. **Synchronized prompts across users**, or generated them non-independently. Bug.
 6. **Used `scheduled_at` or client open-time as the response-window anchor**, or trusted client `captured_at` to decide on-time/late/missed. The server and `dispatched_at` own that. Bug.
