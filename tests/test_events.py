@@ -156,3 +156,71 @@ def test_record_event_rejects_blank_name(auth_client: TestClient, fake_sb: Magic
         json={"group_id": str(uuid4()), "name": ""},
     )
     assert response.status_code == 422
+
+
+def test_record_event_rejects_overlong_name(auth_client: TestClient, fake_sb: MagicMock) -> None:
+    user_id = uuid4()
+    response = auth_client.post(
+        "/events",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"group_id": str(uuid4()), "name": "x" * 65},  # max_length is 64
+    )
+    assert response.status_code == 422
+    fake_sb.table.return_value.insert.assert_not_called()
+
+
+def test_record_event_accepts_max_length_name(auth_client: TestClient, fake_sb: MagicMock) -> None:
+    user_id = uuid4()
+    group_id = uuid4()
+    name = "x" * 64  # the boundary — still valid
+    _stub_member(fake_sb, is_member=True)
+    _stub_insert(fake_sb, _event_row(group_id, user_id, name=name))
+
+    response = auth_client.post(
+        "/events",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"group_id": str(group_id), "name": name},
+    )
+    assert response.status_code == 201
+    assert fake_sb.table.return_value.insert.call_args.args[0]["name"] == name
+
+
+def test_record_event_rejects_invalid_group_uuid(
+    auth_client: TestClient, fake_sb: MagicMock
+) -> None:
+    user_id = uuid4()
+    response = auth_client.post(
+        "/events",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"group_id": "not-a-uuid", "name": "feed_opened"},
+    )
+    assert response.status_code == 422
+    fake_sb.table.return_value.insert.assert_not_called()
+
+
+def test_record_event_requires_group_id(auth_client: TestClient, fake_sb: MagicMock) -> None:
+    user_id = uuid4()
+    response = auth_client.post(
+        "/events",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"name": "feed_opened"},
+    )
+    assert response.status_code == 422
+
+
+def test_record_event_preserves_nested_payload(auth_client: TestClient, fake_sb: MagicMock) -> None:
+    """The server stores the payload verbatim — arbitrary nested JSON survives."""
+    user_id = uuid4()
+    group_id = uuid4()
+    payload = {"source": "standalone", "meta": {"n": 3, "tags": ["a", "b"]}}
+    _stub_member(fake_sb, is_member=True)
+    _stub_insert(fake_sb, _event_row(group_id, user_id, payload=payload))
+
+    response = auth_client.post(
+        "/events",
+        headers={"Authorization": f"Bearer {_mint(user_id)}"},
+        json={"group_id": str(group_id), "name": "feed_opened", "payload": payload},
+    )
+    assert response.status_code == 201
+    assert response.json()["payload"] == payload
+    assert fake_sb.table.return_value.insert.call_args.args[0]["payload"] == payload
